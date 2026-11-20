@@ -93,6 +93,13 @@ struct TagAssignmentSheet: View {
                 .padding(.bottom, 24)
             }
             .scrollDismissesKeyboard(.interactively)
+            .safeAreaInset(edge: .bottom) {
+                if isNoteFocused {
+                    KeyboardDoneBar {
+                        isNoteFocused = false
+                    }
+                }
+            }
             .background(OutcomeTheme.Colors.canvas)
             .navigationTitle("Chọn danh mục")
             .navigationBarTitleDisplayMode(.inline)
@@ -118,14 +125,6 @@ struct TagAssignmentSheet: View {
                         }
                     }
                     .disabled(selectedTagId == nil)
-                }
-
-                ToolbarItemGroup(placement: .keyboard) {
-                    Spacer()
-                    Button("Xong") {
-                        isNoteFocused = false
-                    }
-                    .bold()
                 }
             }
             .sensoryFeedback(.success, trigger: saveTrigger)

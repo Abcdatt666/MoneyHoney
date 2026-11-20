@@ -64,17 +64,15 @@ struct WalletsReconcileView: View {
                 coordinator.refresh()
             }
             .scrollDismissesKeyboard(.interactively)
-            .background(OutcomeTheme.Colors.canvas)
-            .navigationTitle("Ví & Chốt sổ")
-            .toolbar {
-                ToolbarItemGroup(placement: .keyboard) {
-                    Spacer()
-                    Button("Xong") {
+            .safeAreaInset(edge: .bottom) {
+                if focusedField != nil {
+                    KeyboardDoneBar {
                         focusedField = nil
                     }
-                    .bold()
                 }
             }
+            .background(OutcomeTheme.Colors.canvas)
+            .navigationTitle("Ví & Chốt sổ")
             .onAppear {
                 if !didSeedInputs {
                     mbActualText = String(max(0, mbExpected))

@@ -145,6 +145,13 @@ struct ManualEntrySheet: View {
                 .padding(.bottom, 24)
             }
             .scrollDismissesKeyboard(.interactively)
+            .safeAreaInset(edge: .bottom) {
+                if focusedField != nil {
+                    KeyboardDoneBar {
+                        focusedField = nil
+                    }
+                }
+            }
             .background(OutcomeTheme.Colors.canvas)
             .navigationTitle("Nhập giao dịch")
             .navigationBarTitleDisplayMode(.inline)
@@ -172,14 +179,6 @@ struct ManualEntrySheet: View {
                         dismiss()
                     }
                     .disabled(!canSave)
-                }
-
-                ToolbarItemGroup(placement: .keyboard) {
-                    Spacer()
-                    Button("Xong") {
-                        focusedField = nil
-                    }
-                    .bold()
                 }
             }
             .sensoryFeedback(.success, trigger: saveTrigger)

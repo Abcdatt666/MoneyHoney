@@ -28,7 +28,7 @@
   - Canvas: `Color(.systemGroupedBackground)`
   - Content Containers: `Color(.secondarySystemGroupedBackground)` with `RoundedRectangle(cornerRadius: 20, style: .continuous)` / `22pt` (no drop shadows)
   - Dual-Wallet Tiles: Adaptive matte semantic tints (`MBBank` cool slate tint, `Ví MoMo` soft rose tint) supporting both Light and Dark Mode seamlessly
-  - Navigation & Toolbars: Native `NavigationStack` with Large Title, floating native `TabView` (`Tổng quan`, `Chờ duyệt`, `Ví`) + floating `+` action with iOS 26 Liquid Glass (`.tabBarMinimizeBehavior(.onScrollDown)`), never glass on primary content cards
+  - Navigation & Toolbars: Native `NavigationStack` with Large Title, floating native `TabView` (`Tổng quan`, `Chờ duyệt`, `Ví`) kept permanently visible (`.tabBarMinimizeBehavior(.never)`), never glass on primary content cards
 - **Color Tokens**:
   - Single Primary Accent: Warm Tangerine / Coral (`AccentColor` Asset with Light/Dark variants)
   - Semantic Status: `.green` (income / matched balance), `.red` (discrepancy / badge), `.orange` (pending status), `.secondary` (internal transfer / metadata)
