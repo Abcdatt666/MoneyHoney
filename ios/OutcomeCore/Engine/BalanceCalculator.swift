@@ -7,6 +7,7 @@ public enum BalanceCalculator {
         case negativeActualBalance(WalletId)
     }
 
+    @MainActor
     private static func applyDelta(
         store: ExpenseStore,
         tx: Transaction,
