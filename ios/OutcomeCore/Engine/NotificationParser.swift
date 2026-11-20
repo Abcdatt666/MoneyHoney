@@ -1,0 +1,289 @@
+import Foundation
+
+/// Notification parser for MBBank and MoMo push notifications.
+public enum NotificationParser {
+    private static let mbGdRegex = try! NSRegularExpression(
+        pattern: #"GD\s*:\s*(?<sign>[+-])\s*(?<num>\d{1,3}(?:[.,]\d{3})+|\d+)\s*(?:VND|VNĐ|Đ|D)?(?:\s+(?<dt>\d{2}/\d{2}/\d{2,4}\s+\d{2}:\d{2}(?::\d{2})?))?"#,
+        options: [.caseInsensitive]
+    )
+
+    private static let signedAmountRegex = try! NSRegularExpression(
+        pattern: #"(?<sign>[+-])\s*(?<num>\d{1,3}(?:[.,]\d{3})+|\d+)\s*(?:VND|VNĐ|Đ|D)?"#,
+        options: [.caseInsensitive]
+    )
+
+    private static let currencyAmountRegex = try! NSRegularExpression(
+        pattern: #"\b(?<num>\d{1,3}(?:[.,]\d{3})+|\d+)\s*(?:VND|VNĐ|đ)\b"#,
+        options: [.caseInsensitive]
+    )
+
+    private static let balanceRegex = try! NSRegularExpression(
+        pattern: #"(?:SD|SO\s*DU|SỐ\s*DƯ)\s*[:\-]?\s*(?<num>\d{1,3}(?:[.,]\d{3})+|\d+)\s*(?:VND|VNĐ|Đ|D)?"#,
+        options: [.caseInsensitive]
+    )
+
+    private static let ndRegex = try! NSRegularExpression(
+        pattern: #"(?:ND|NỘI\s*DUNG|NOI\s*DUNG)\s*:\s*(?<val>[^|\n]+)"#,
+        options: [.caseInsensitive]
+    )
+
+    private static let traceRegex = try! NSRegularExpression(
+        pattern: #"(?:-\s*)?(?:M[aã]\s+giao\s+d[iị]ch\s*/\s*Trace|Trace)\s*[:#]?\s*(?<trace>[A-Z0-9]+)\b"#,
+        options: [.caseInsensitive]
+    )
+
+    private static let momoReceiveRegex = try! NSRegularExpression(
+        pattern: #"^(?<sender>.+?)\s+(?:đã\s+)?(?:chuyển|gửi)\s+(?:tiền\s+)?(?:cho\s+bạn|đến\s+bạn)"#,
+        options: [.caseInsensitive]
+    )
+
+    private static let momoMessageRegex = try! NSRegularExpression(
+        pattern: #"L[ơờ]i\s+nh[ắa]n\s*:\s*(?<msg>.+)$"#,
+        options: [.caseInsensitive]
+    )
+
+    private static let promoKeywords: [String] = [
+        "UU DAI",
+        "KHUYEN MAI",
+        "GIAM GIA",
+        "VOUCHER",
+        "HOAN TIEN LEN DEN",
+        "BAO TRI",
+        "CAP NHAT UNG DUNG",
+        "MA OTP",
+        "OTP",
+    ]
+
+    private static let inPhrases: [String] = [
+        "NHAN DUOC",
+        "NHAN TIEN",
+        "CHUYEN CHO BAN",
+        "GUI CHO BAN",
+        "CHUYEN DEN BAN",
+        "CONG TIEN",
+        "HOAN TIEN",
+    ]
+
+    private static let outPhrases: [String] = [
+        "THANH TOAN",
+        "CHUYEN TIEN",
+        "CHUYEN KHOAN",
+        "DA CHUYEN",
+        "TRU TIEN",
+        "RUT TIEN",
+    ]
+
+    public static func parse(_ raw: RawNotification) -> ParsedTransaction? {
+        let combined = "\(raw.title) \(raw.body)".trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !combined.isEmpty else { return nil }
+
+        let upperAscii = stripVietnameseAccents(combined).uppercased()
+        let combinedWithoutBalance = replacingMatches(of: balanceRegex, in: combined, with: " ")
+
+        if promoKeywords.contains(where: { upperAscii.contains($0) }),
+           firstMatch(of: signedAmountRegex, in: combinedWithoutBalance) == nil {
+            return nil
+        }
+
+        guard let extracted = extractAmountDirectionAndTime(from: combined, fallbackDate: raw.receivedAt) else {
+            return nil
+        }
+
+        let reportedBalance = extractReportedBalance(from: combined)
+        let traceId = extractTraceId(from: combined)
+        let description = extractDescription(rawTitle: raw.title, rawBody: raw.body)
+
+        if raw.sourceApp == .mbbank {
+            if upperAscii.contains("MOMO-CASHIN"), extracted.direction == .out {
+                return ParsedTransaction(
+                    txType: .internalTransfer,
+                    sourceWalletId: .mbbank,
+                    targetWalletId: .momo,
+                    amount: extracted.amount,
+                    direction: .out,
+                    description: "Nạp tiền ví MoMo (MOMO-CASHIN)",
+                    traceId: traceId,
+                    reportedBalanceAfter: reportedBalance,
+                    occurredAt: extracted.occurredAt
+                )
+            }
+            if upperAscii.contains("MOMO-CASHOUT"), extracted.direction == .in {
+                return ParsedTransaction(
+                    txType: .internalTransfer,
+                    sourceWalletId: .momo,
+                    targetWalletId: .mbbank,
+                    amount: extracted.amount,
+                    direction: .in,
+                    description: "Rút tiền từ MoMo về MBBank (MOMO-CASHOUT)",
+                    traceId: traceId,
+                    reportedBalanceAfter: reportedBalance,
+                    occurredAt: extracted.occurredAt
+                )
+            }
+        }
+
+        let txType: TransactionType = extracted.direction == .out ? .expense : .income
+        return ParsedTransaction(
+            txType: txType,
+            sourceWalletId: raw.sourceApp,
+            targetWalletId: nil,
+            amount: extracted.amount,
+            direction: extracted.direction,
+            description: description,
+            traceId: traceId,
+            reportedBalanceAfter: reportedBalance,
+            occurredAt: extracted.occurredAt
+        )
+    }
+
+    // MARK: - Helpers
+
+    private static func stripVietnameseAccents(_ text: String) -> String {
+        text
+            .replacingOccurrences(of: "đ", with: "d")
+            .replacingOccurrences(of: "Đ", with: "D")
+            .folding(options: .diacriticInsensitive, locale: Locale(identifier: "en_US_POSIX"))
+    }
+
+    private static func parseVndInt(_ numText: String) -> Int? {
+        let digits = numText.replacingOccurrences(of: #"[.,\s]"#, with: "", options: .regularExpression)
+        return Int(digits)
+    }
+
+    private static func parseMbDatetime(_ dtText: String?, fallback: Date) -> Date {
+        guard let dtText = dtText?.trimmingCharacters(in: .whitespacesAndNewlines), !dtText.isEmpty else {
+            return fallback
+        }
+        let formats = ["dd/MM/yy HH:mm", "dd/MM/yyyy HH:mm", "dd/MM/yy HH:mm:ss", "dd/MM/yyyy HH:mm:ss"]
+        for fmt in formats {
+            let formatter = DateFormatter()
+            formatter.locale = Locale(identifier: "en_US_POSIX")
+            formatter.timeZone = .current
+            formatter.dateFormat = fmt
+            if let parsed = formatter.date(from: dtText) {
+                return parsed
+            }
+        }
+        return fallback
+    }
+
+    private static func extractAmountDirectionAndTime(
+        from text: String,
+        fallbackDate: Date
+    ) -> (amount: Int, direction: Direction, occurredAt: Date)? {
+        if let mbGd = firstMatch(of: mbGdRegex, in: text),
+           let numStr = capturedGroup("num", in: mbGd, text: text),
+           let signStr = capturedGroup("sign", in: mbGd, text: text),
+           let amount = parseVndInt(numStr), amount > 0 {
+            let direction: Direction = signStr == "-" ? .out : .in
+            let occurredAt = parseMbDatetime(capturedGroup("dt", in: mbGd, text: text), fallback: fallbackDate)
+            return (amount, direction, occurredAt)
+        }
+
+        let textNoSd = replacingMatches(of: balanceRegex, in: text, with: " ")
+
+        if let signed = firstMatch(of: signedAmountRegex, in: textNoSd),
+           let numStr = capturedGroup("num", in: signed, text: textNoSd),
+           let signStr = capturedGroup("sign", in: signed, text: textNoSd),
+           let amount = parseVndInt(numStr), amount > 0 {
+            let direction: Direction = signStr == "-" ? .out : .in
+            return (amount, direction, fallbackDate)
+        }
+
+        let upperAscii = stripVietnameseAccents(textNoSd).uppercased()
+        if let currency = firstMatch(of: currencyAmountRegex, in: textNoSd),
+           let numStr = capturedGroup("num", in: currency, text: textNoSd),
+           let amount = parseVndInt(numStr), amount > 0 {
+            if inPhrases.contains(where: { upperAscii.contains($0) }) {
+                return (amount, .in, fallbackDate)
+            }
+            if outPhrases.contains(where: { upperAscii.contains($0) }) {
+                return (amount, .out, fallbackDate)
+            }
+        }
+
+        return nil
+    }
+
+    private static func extractReportedBalance(from text: String) -> Int? {
+        guard let match = firstMatch(of: balanceRegex, in: text),
+              let numStr = capturedGroup("num", in: match, text: text) else {
+            return nil
+        }
+        return parseVndInt(numStr)
+    }
+
+    private static func extractTraceId(from text: String) -> String? {
+        guard let match = firstMatch(of: traceRegex, in: text),
+              let trace = capturedGroup("trace", in: match, text: text) else {
+            return nil
+        }
+        return trace.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private static func extractDescription(rawTitle: String, rawBody: String) -> String {
+        let combined = "\(rawTitle)\n\(rawBody)".trimmingCharacters(in: .whitespacesAndNewlines)
+        let upperAscii = stripVietnameseAccents(combined).uppercased()
+
+        if upperAscii.contains("MOMO-CASHIN") { return "MOMO-CASHIN" }
+        if upperAscii.contains("MOMO-CASHOUT") { return "MOMO-CASHOUT" }
+
+        let trimChars = CharacterSet.whitespacesAndNewlines.union(CharacterSet(charactersIn: ".:-|"))
+
+        if let ndMatch = firstMatch(of: ndRegex, in: combined),
+           let val = capturedGroup("val", in: ndMatch, text: combined) {
+            let cleaned = replacingMatches(of: traceRegex, in: val, with: "")
+                .trimmingCharacters(in: trimChars)
+            if !cleaned.isEmpty {
+                return cleaned
+            }
+        }
+
+        let trimmedBody = rawBody.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let momoMatch = firstMatch(of: momoReceiveRegex, in: trimmedBody),
+           let senderRaw = capturedGroup("sender", in: momoMatch, text: trimmedBody) {
+            let sender = senderRaw.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines.union(CharacterSet(charactersIn: ".:-")))
+            if let msgMatch = firstMatch(of: momoMessageRegex, in: rawBody),
+               let msg = capturedGroup("msg", in: msgMatch, text: rawBody) {
+                return "\(sender) - \(msg.trimmingCharacters(in: .whitespacesAndNewlines))"
+            }
+            return sender
+        }
+
+        var cleaned = replacingMatches(of: balanceRegex, in: rawBody, with: " ")
+        cleaned = replacingMatches(of: traceRegex, in: cleaned, with: " ")
+        cleaned = replacingMatches(of: signedAmountRegex, in: cleaned, with: " ")
+        cleaned = replacingMatches(of: currencyAmountRegex, in: cleaned, with: " ")
+        cleaned = cleaned
+            .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+            .trimmingCharacters(in: trimChars)
+
+        return cleaned.isEmpty ? "Không rõ nội dung" : cleaned
+    }
+
+    private static func firstMatch(of regex: NSRegularExpression, in text: String) -> NSTextCheckingResult? {
+        let range = NSRange(text.startIndex..<text.endIndex, in: text)
+        return regex.firstMatch(in: text, options: [], range: range)
+    }
+
+    private static func replacingMatches(
+        of regex: NSRegularExpression,
+        in text: String,
+        with template: String
+    ) -> String {
+        let range = NSRange(text.startIndex..<text.endIndex, in: text)
+        return regex.stringByReplacingMatches(in: text, options: [], range: range, withTemplate: template)
+    }
+
+    private static func capturedGroup(
+        _ name: String,
+        in match: NSTextCheckingResult,
+        text: String
+    ) -> String? {
+        let nsRange = match.range(withName: name)
+        guard nsRange.location != NSNotFound, let range = Range(nsRange, in: text) else {
+            return nil
+        }
+        return String(text[range])
+    }
+}

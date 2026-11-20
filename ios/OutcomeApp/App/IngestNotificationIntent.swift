@@ -1,0 +1,65 @@
+import AppIntents
+import Foundation
+import OutcomeCore
+
+enum ShortcutWalletSource: String, AppEnum {
+    case mbbank = "MBBANK"
+    case momo = "MOMO"
+
+    static let typeDisplayRepresentation = TypeDisplayRepresentation(name: "Nguồn thông báo")
+    static let caseDisplayRepresentations: [ShortcutWalletSource: DisplayRepresentation] = [
+        .mbbank: DisplayRepresentation(title: "MBBank"),
+        .momo: DisplayRepresentation(title: "MoMo"),
+    ]
+
+    var walletId: WalletId {
+        switch self {
+        case .mbbank: return .mbbank
+        case .momo: return .momo
+        }
+    }
+}
+
+/// Invoked automatically by iOS Shortcuts when MBBank or MoMo pushes a notification.
+struct IngestNotificationIntent: AppIntent {
+    static let title: LocalizedStringResource = "Ghi nhận biến động số dư"
+    static let description = IntentDescription(
+        "Phân tích thông báo từ MBBank hoặc MoMo, cập nhật số dư ví và nhắc chọn tag."
+    )
+    static let openAppWhenRun: Bool = false
+
+    @Parameter(title: "Ứng dụng nguồn")
+    var sourceApp: ShortcutWalletSource
+
+    @Parameter(title: "Tiêu đề thông báo", default: "")
+    var notificationTitle: String
+
+    @Parameter(title: "Nội dung thông báo")
+    var notificationBody: String
+
+    @MainActor
+    func perform() async throws -> some IntentResult & ProvidesDialog {
+        let store = SwiftDataExpenseStore()
+        let engine = ExpenseEngine(store: store)
+        let raw = RawNotification(
+            sourceApp: sourceApp.walletId,
+            title: notificationTitle,
+            body: notificationBody,
+            receivedAt: Date()
+        )
+        let result = engine.ingestNotification(raw)
+
+        switch result.status {
+        case .created:
+            if let prompt = result.prompt, prompt.shouldPrompt {
+                await ReminderScheduler.scheduleTransactionPrompt(prompt)
+                return .result(dialog: "\(prompt.title)")
+            }
+            return .result(dialog: "Đã ghi nhận chuyển tiền nội bộ.")
+        case .duplicate:
+            return .result(dialog: "Giao dịch trùng lặp đã được bỏ qua.")
+        case .ignored:
+            return .result(dialog: "Không phải thông báo giao dịch hợp lệ.")
+        }
+    }
+}

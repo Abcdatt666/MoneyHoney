@@ -1,0 +1,24 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+data/
+
+# Xcode / Swift / iOS build artifacts
+ios/.build/
+ios/build/
+ios/DerivedData/
+ios/Payload/
+ios/*.xcodeproj/
+ios/*.xcworkspace/
+ios/*.ipa
+*.xcuserstate
+
+# Local AI agent skills (already documented in SETUP_PERSONAL_LAPTOP.md)
+.agents/
+
+# OS
+.DS_Store
+Thumbs.db

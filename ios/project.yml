@@ -1,0 +1,54 @@
+name: Outcome
+options:
+  bundleIdPrefix: com.outcome
+  deploymentTarget:
+    iOS: "26.0"
+  xcodeVersion: "26.0"
+packages:
+  OutcomeCore:
+    path: .
+settings:
+  base:
+    SWIFT_VERSION: "6.0"
+    SWIFT_STRICT_CONCURRENCY: complete
+targets:
+  Outcome:
+    type: application
+    platform: iOS
+    deploymentTarget: "26.0"
+    sources:
+      - path: OutcomeApp
+    dependencies:
+      - package: OutcomeCore
+        product: OutcomeCore
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.outcome.app
+        INFOPLIST_KEY_CFBundleDisplayName: Outcome
+        INFOPLIST_KEY_UIApplicationSceneManifest_Generation: YES
+        INFOPLIST_KEY_UILaunchScreen_Generation: YES
+        INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone: UIInterfaceOrientationPortrait
+        GENERATE_INFOPLIST_FILE: YES
+        CODE_SIGNING_ALLOWED: "NO"
+        CODE_SIGNING_REQUIRED: "NO"
+  OutcomeCoreTests:
+    type: bundle.unit-test
+    platform: iOS
+    deploymentTarget: "26.0"
+    sources:
+      - path: OutcomeCoreTests
+    dependencies:
+      - package: OutcomeCore
+        product: OutcomeCore
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: YES
+schemes:
+  Outcome:
+    build:
+      targets:
+        Outcome: all
+        OutcomeCoreTests: [test]
+    test:
+      targets:
+        - OutcomeCoreTests
