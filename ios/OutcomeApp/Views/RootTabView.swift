@@ -7,7 +7,7 @@ struct RootTabView: View {
     var body: some View {
         @Bindable var bindableCoordinator = coordinator
 
-        let tabs = TabView(selection: $bindableCoordinator.selectedTab) {
+        TabView(selection: $bindableCoordinator.selectedTab) {
             Tab("Tổng quan", systemImage: "house.fill", value: OutcomeTab.overview) {
                 OverviewView()
             }
@@ -21,16 +21,9 @@ struct RootTabView: View {
                 WalletsReconcileView()
             }
         }
-
-        Group {
-            if #available(iOS 26, *) {
-                tabs.tabBarMinimizeBehavior(.onScrollDown)
-            } else {
-                tabs
-            }
-        }
+        .modifier(TabBarMinimizeModifier())
         .sheet(item: $bindableCoordinator.activeTaggingTransaction) { tx in
-            TagAssignmentSheet(transaction: tx)
+            TagAssignmentSheet(item: tx)
         }
         .sheet(isPresented: $bindableCoordinator.isPresentingManualEntry) {
             ManualEntrySheet()
@@ -49,6 +42,16 @@ struct RootTabView: View {
             }
         } message: {
             Text(coordinator.errorMessage ?? "")
+        }
+    }
+}
+
+private struct TabBarMinimizeModifier: ViewModifier {
+    func body(content: Content) -> some View {
+        if #available(iOS 26, *) {
+            content.tabBarMinimizeBehavior(.onScrollDown)
+        } else {
+            content
         }
     }
 }

@@ -5,11 +5,11 @@ struct OverviewView: View {
     @Environment(AppCoordinator.self) private var coordinator
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     @State private var selectedWalletFilter: WalletId?
-    @State private var pendingDeletion: Transaction?
+    @State private var pendingDeletion: OutcomeCore.Transaction?
 
-    private var filteredRecentTransactions: [Transaction] {
+    private var filteredRecentTransactions: [OutcomeCore.Transaction] {
         let base = coordinator.allTransactions
-        let filtered: [Transaction]
+        let filtered: [OutcomeCore.Transaction]
         if let walletId = selectedWalletFilter {
             filtered = base.filter {
                 $0.sourceWalletId == walletId || $0.targetWalletId == walletId
@@ -170,7 +170,7 @@ struct OverviewView: View {
                             }
                         } label: {
                             TransactionRow(
-                                transaction: tx,
+                                item: tx,
                                 tagName: coordinator.tagName(for: tx.tagId)
                             )
                         }
@@ -193,17 +193,21 @@ struct OverviewView: View {
         .background(OutcomeTheme.Colors.card, in: .rect(cornerRadius: OutcomeTheme.Layout.cardRadius))
     }
 
-    @ViewBuilder
     private var addTransactionButton: some View {
-        let button = Button("Thêm giao dịch", systemImage: "plus") {
+        Button("Thêm giao dịch", systemImage: "plus") {
             coordinator.isPresentingManualEntry = true
         }
         .labelStyle(.iconOnly)
+        .modifier(GlassProminentButtonModifier())
+    }
+}
 
+private struct GlassProminentButtonModifier: ViewModifier {
+    func body(content: Content) -> some View {
         if #available(iOS 26, *) {
-            button.buttonStyle(.glassProminent)
+            content.buttonStyle(.glassProminent)
         } else {
-            button
+            content
         }
     }
 }

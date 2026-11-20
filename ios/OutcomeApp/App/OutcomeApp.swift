@@ -3,7 +3,7 @@ import SwiftUI
 import UserNotifications
 
 @MainActor
-final class NotificationCenterDelegate: NSObject, UNUserNotificationCenterDelegate {
+final class NotificationCenterDelegate: NSObject, @preconcurrency UNUserNotificationCenterDelegate {
     var onSelectTransactionId: ((String) -> Void)?
     var onOpenReconcile: (() -> Void)?
 

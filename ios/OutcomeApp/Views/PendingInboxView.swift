@@ -4,7 +4,7 @@ import SwiftUI
 struct PendingInboxView: View {
     @Environment(AppCoordinator.self) private var coordinator
 
-    private var recentInternalTransfers: [Transaction] {
+    private var recentInternalTransfers: [OutcomeCore.Transaction] {
         coordinator.allTransactions
             .filter { $0.txType == .internalTransfer }
             .prefix(5)
@@ -49,7 +49,7 @@ struct PendingInboxView: View {
 
                             VStack(spacing: 10) {
                                 ForEach(recentInternalTransfers) { tx in
-                                    TransactionRow(transaction: tx, tagName: nil)
+                                    TransactionRow(item: tx, tagName: nil)
                                         .padding(14)
                                         .background(
                                             OutcomeTheme.Colors.card.opacity(0.75),
@@ -68,7 +68,7 @@ struct PendingInboxView: View {
         }
     }
 
-    private func pendingCard(for tx: Transaction) -> some View {
+    private func pendingCard(for tx: OutcomeCore.Transaction) -> some View {
         HStack(spacing: 12) {
             Image(systemName: OutcomeTheme.symbol(for: tx.sourceWalletId))
                 .font(.headline)

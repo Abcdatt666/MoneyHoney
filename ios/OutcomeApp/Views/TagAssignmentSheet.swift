@@ -5,7 +5,7 @@ struct TagAssignmentSheet: View {
     @Environment(AppCoordinator.self) private var coordinator
     @Environment(\.dismiss) private var dismiss
 
-    let transaction: Transaction
+    let item: OutcomeCore.Transaction
 
     @State private var selectedTagId: String?
     @State private var note: String
@@ -13,10 +13,10 @@ struct TagAssignmentSheet: View {
     @State private var newTagName: String = ""
     @State private var saveTrigger: Int = 0
 
-    init(transaction: Transaction) {
-        self.transaction = transaction
-        _selectedTagId = State(initialValue: transaction.tagId)
-        _note = State(initialValue: transaction.note)
+    init(item: OutcomeCore.Transaction) {
+        self.item = item
+        _selectedTagId = State(initialValue: item.tagId)
+        _note = State(initialValue: item.note)
     }
 
     var body: some View {
@@ -69,14 +69,15 @@ struct TagAssignmentSheet: View {
 
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Lưu") {
-                        guard let tagId = selectedTagId else { return }
-                        saveTrigger += 1
-                        coordinator.confirmTransaction(
-                            txId: transaction.id,
-                            tagId: tagId,
-                            note: note
-                        )
-                        dismiss()
+                        if let tagId = selectedTagId {
+                            saveTrigger += 1
+                            coordinator.confirmTransaction(
+                                txId: item.id,
+                                tagId: tagId,
+                                note: note
+                            )
+                            dismiss()
+                        }
                     }
                     .disabled(selectedTagId == nil)
                 }
@@ -98,16 +99,16 @@ struct TagAssignmentSheet: View {
 
     private var summaryCard: some View {
         VStack(spacing: 4) {
-            Text("\(transaction.sourceWalletId.displayName) · \(transaction.description)")
+            Text("\(item.sourceWalletId.displayName) · \(item.description)")
                 .font(.footnote)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
 
-            Text(VNDFormatter.formatSigned(transaction.amount, direction: transaction.direction))
+            Text(VNDFormatter.formatSigned(item.amount, direction: item.direction))
                 .font(.system(.title, design: .rounded))
                 .bold()
                 .monospacedDigit()
-                .foregroundStyle(transaction.direction == .in ? OutcomeTheme.Colors.income : .primary)
+                .foregroundStyle(item.direction == .in ? OutcomeTheme.Colors.income : .primary)
         }
         .padding(16)
         .frame(maxWidth: .infinity)

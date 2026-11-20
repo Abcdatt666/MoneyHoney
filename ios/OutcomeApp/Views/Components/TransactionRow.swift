@@ -2,47 +2,47 @@ import OutcomeCore
 import SwiftUI
 
 struct TransactionRow: View {
-    let transaction: Transaction
+    let item: OutcomeCore.Transaction
     let tagName: String?
 
     private var iconTint: Color {
-        if transaction.txType == .internalTransfer {
+        if item.txType == .internalTransfer {
             return .secondary
         }
-        if transaction.status == .pending {
+        if item.status == .pending {
             return OutcomeTheme.Colors.pending
         }
-        return transaction.direction == .in ? OutcomeTheme.Colors.income : OutcomeTheme.Colors.accent
+        return item.direction == .in ? OutcomeTheme.Colors.income : OutcomeTheme.Colors.accent
     }
 
     private var subtitleText: String {
-        if transaction.txType == .internalTransfer {
-            let target = transaction.targetWalletId?.displayName ?? ""
-            return "\(transaction.sourceWalletId.displayName) → \(target)"
+        if item.txType == .internalTransfer {
+            let target = item.targetWalletId?.displayName ?? ""
+            return "\(item.sourceWalletId.displayName) → \(target)"
         }
-        let statusOrTag = transaction.status == .pending
+        let statusOrTag = item.status == .pending
             ? "Chờ gắn tag"
             : (tagName ?? "Đã phân loại")
-        return "\(transaction.sourceWalletId.displayName) · \(statusOrTag)"
+        return "\(item.sourceWalletId.displayName) · \(statusOrTag)"
     }
 
     private var amountText: String {
-        if transaction.txType == .internalTransfer {
-            return VNDFormatter.format(transaction.amount)
+        if item.txType == .internalTransfer {
+            return VNDFormatter.format(item.amount)
         }
-        return VNDFormatter.formatSigned(transaction.amount, direction: transaction.direction)
+        return VNDFormatter.formatSigned(item.amount, direction: item.direction)
     }
 
     private var amountStyle: Color {
-        if transaction.txType == .internalTransfer {
+        if item.txType == .internalTransfer {
             return .secondary
         }
-        return transaction.direction == .in ? OutcomeTheme.Colors.income : .primary
+        return item.direction == .in ? OutcomeTheme.Colors.income : .primary
     }
 
     var body: some View {
         HStack(spacing: 12) {
-            Image(systemName: OutcomeTheme.symbol(for: transaction))
+            Image(systemName: OutcomeTheme.symbol(for: item))
                 .font(.subheadline.bold())
                 .foregroundStyle(.white)
                 .frame(width: 38, height: 38)
@@ -50,14 +50,14 @@ struct TransactionRow: View {
                 .accessibilityHidden(true)
 
             VStack(alignment: .leading, spacing: 2) {
-                Text(transaction.description)
+                Text(item.description)
                     .font(.body)
                     .foregroundStyle(.primary)
                     .lineLimit(1)
 
                 Text(subtitleText)
                     .font(.footnote)
-                    .foregroundStyle(transaction.status == .pending ? OutcomeTheme.Colors.pending : .secondary)
+                    .foregroundStyle(item.status == .pending ? OutcomeTheme.Colors.pending : .secondary)
                     .lineLimit(1)
             }
 
@@ -69,7 +69,7 @@ struct TransactionRow: View {
                     .monospacedDigit()
                     .foregroundStyle(amountStyle)
 
-                Text(transaction.occurredAt, format: .dateTime.hour().minute())
+                Text(item.occurredAt, format: .dateTime.hour().minute())
                     .font(.footnote)
                     .monospacedDigit()
                     .foregroundStyle(.tertiary)

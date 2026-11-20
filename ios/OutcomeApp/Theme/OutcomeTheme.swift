@@ -62,7 +62,7 @@ enum OutcomeTheme {
         }
     }
 
-    static func symbol(for tx: Transaction) -> String {
+    static func symbol(for tx: OutcomeCore.Transaction) -> String {
         if tx.txType == .internalTransfer {
             return "arrow.left.arrow.right"
         }
