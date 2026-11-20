@@ -2,11 +2,17 @@ import OutcomeCore
 import SwiftUI
 
 struct WalletsReconcileView: View {
-    @Environment(AppCoordinator.self) private var coordinator
-    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
+    private enum Field: Hashable {
+        case mbActual
+        case momoActual
+        case note
+    }
 
-    @State private var mbActualInput: Int = 0
-    @State private var momoActualInput: Int = 0
+    @Environment(AppCoordinator.self) private var coordinator
+    @FocusState private var focusedField: Field?
+
+    @State private var mbActualText: String = ""
+    @State private var momoActualText: String = ""
     @State private var reconcileNote: String = ""
     @State private var didSeedInputs: Bool = false
     @State private var reconcileTrigger: Int = 0
@@ -19,8 +25,22 @@ struct WalletsReconcileView: View {
         coordinator.wallets.first(where: { $0.id == .momo })?.balance ?? 0
     }
 
-    private var mbDelta: Int { mbActualInput - mbExpected }
-    private var momoDelta: Int { momoActualInput - momoExpected }
+    private var parsedMbActual: Int? {
+        let digits = mbActualText.filter(\.isNumber)
+        return digits.isEmpty ? nil : Int(digits)
+    }
+
+    private var parsedMomoActual: Int? {
+        let digits = momoActualText.filter(\.isNumber)
+        return digits.isEmpty ? nil : Int(digits)
+    }
+
+    private var mbDelta: Int { (parsedMbActual ?? 0) - mbExpected }
+    private var momoDelta: Int { (parsedMomoActual ?? 0) - momoExpected }
+
+    private var canCommit: Bool {
+        parsedMbActual != nil && parsedMomoActual != nil
+    }
 
     var body: some View {
         NavigationStack {
@@ -28,7 +48,7 @@ struct WalletsReconcileView: View {
                 VStack(alignment: .leading, spacing: OutcomeTheme.Layout.sectionSpacing) {
                     reminderCard
 
-                    reconcileTiles
+                    reconcileCards
 
                     noteAndActionCard
 
@@ -37,22 +57,40 @@ struct WalletsReconcileView: View {
                     }
                 }
                 .padding(.horizontal, OutcomeTheme.Layout.horizontalPadding)
-                .padding(.vertical, 12)
+                .padding(.top, 12)
+                .padding(.bottom, 28)
             }
+            .refreshable {
+                coordinator.refresh()
+            }
+            .scrollDismissesKeyboard(.interactively)
             .background(OutcomeTheme.Colors.canvas)
             .navigationTitle("Ví & Chốt sổ")
+            .toolbar {
+                ToolbarItemGroup(placement: .keyboard) {
+                    Spacer()
+                    Button("Xong") {
+                        focusedField = nil
+                    }
+                    .bold()
+                }
+            }
             .onAppear {
                 if !didSeedInputs {
-                    mbActualInput = mbExpected
-                    momoActualInput = momoExpected
+                    mbActualText = String(max(0, mbExpected))
+                    momoActualText = String(max(0, momoExpected))
                     didSeedInputs = true
                 }
             }
             .onChange(of: mbExpected) { _, newValue in
-                mbActualInput = newValue
+                if focusedField != .mbActual {
+                    mbActualText = String(max(0, newValue))
+                }
             }
             .onChange(of: momoExpected) { _, newValue in
-                momoActualInput = newValue
+                if focusedField != .momoActual {
+                    momoActualText = String(max(0, newValue))
+                }
             }
             .sensoryFeedback(.success, trigger: reconcileTrigger)
         }
@@ -84,65 +122,106 @@ struct WalletsReconcileView: View {
         .background(OutcomeTheme.Colors.card, in: .rect(cornerRadius: OutcomeTheme.Layout.cardRadius))
     }
 
-    private var reconcileTiles: some View {
-        let layout = dynamicTypeSize.isAccessibilitySize
-            ? AnyLayout(VStackLayout(spacing: OutcomeTheme.Layout.tileSpacing))
-            : AnyLayout(HStackLayout(spacing: OutcomeTheme.Layout.tileSpacing))
-
-        return layout {
-            reconcileTile(
-                title: "MBBank",
+    private var reconcileCards: some View {
+        VStack(spacing: 12) {
+            reconcileCard(
+                walletId: .mbbank,
                 expected: mbExpected,
+                actual: parsedMbActual,
                 delta: mbDelta,
                 surface: OutcomeTheme.Colors.mbbankTile,
-                inputValue: $mbActualInput
+                textBinding: $mbActualText,
+                field: .mbActual
             )
 
-            reconcileTile(
-                title: "Ví MoMo",
+            reconcileCard(
+                walletId: .momo,
                 expected: momoExpected,
+                actual: parsedMomoActual,
                 delta: momoDelta,
                 surface: OutcomeTheme.Colors.momoTile,
-                inputValue: $momoActualInput
+                textBinding: $momoActualText,
+                field: .momoActual
             )
         }
     }
 
-    private func reconcileTile(
-        title: String,
+    private func reconcileCard(
+        walletId: WalletId,
         expected: Int,
+        actual: Int?,
         delta: Int,
         surface: Color,
-        inputValue: Binding<Int>
+        textBinding: Binding<String>,
+        field: Field
     ) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text(title)
-                .font(.subheadline.bold())
-                .foregroundStyle(.primary)
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Label(walletId.displayName, systemImage: OutcomeTheme.symbol(for: walletId))
+                    .font(.headline)
+                    .foregroundStyle(.primary)
 
-            Text("App: \(VNDFormatter.format(expected))")
-                .font(.footnote)
-                .monospacedDigit()
-                .foregroundStyle(.secondary)
+                Spacer()
 
-            TextField("Số dư thực", value: inputValue, format: .number)
-                .keyboardType(.numberPad)
-                .font(.headline.bold())
-                .monospacedDigit()
-                .padding(.horizontal, 10)
-                .padding(.vertical, 8)
-                .frame(minHeight: OutcomeTheme.Layout.minTouchTarget)
-                .background(OutcomeTheme.Colors.card, in: .rect(cornerRadius: 12))
+                Text("App: \(VNDFormatter.format(expected))")
+                    .font(.footnote)
+                    .monospacedDigit()
+                    .foregroundStyle(.secondary)
+            }
 
-            Label(
-                VNDFormatter.formatDelta(delta),
-                systemImage: delta == 0 ? "checkmark.circle.fill" : "exclamationmark.triangle.fill"
-            )
-            .font(.footnote.bold())
-            .monospacedDigit()
-            .foregroundStyle(delta == 0 ? OutcomeTheme.Colors.income : OutcomeTheme.Colors.discrepancy)
+            HStack(spacing: 8) {
+                TextField("Nhập số dư thực tế", text: textBinding)
+                    .keyboardType(.numberPad)
+                    .focused($focusedField, equals: field)
+                    .font(.title3.bold())
+                    .monospacedDigit()
+                    .onChange(of: textBinding.wrappedValue) { _, newValue in
+                        let digits = String(newValue.filter(\.isNumber).prefix(12))
+                        if digits != newValue {
+                            textBinding.wrappedValue = digits
+                        }
+                    }
+
+                if !textBinding.wrappedValue.isEmpty {
+                    Button("Xóa số dư", systemImage: "xmark.circle.fill") {
+                        textBinding.wrappedValue = ""
+                    }
+                    .labelStyle(.iconOnly)
+                    .foregroundStyle(.secondary)
+                    .frame(minWidth: OutcomeTheme.Layout.minTouchTarget, minHeight: OutcomeTheme.Layout.minTouchTarget)
+                }
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 4)
+            .frame(minHeight: 50)
+            .background(OutcomeTheme.Colors.card, in: .rect(cornerRadius: 14))
+
+            HStack {
+                if let actual {
+                    Text(VNDFormatter.format(actual))
+                        .font(.footnote.bold())
+                        .monospacedDigit()
+                        .foregroundStyle(.secondary)
+                }
+
+                Spacer()
+
+                if actual != nil {
+                    Label(
+                        VNDFormatter.formatDelta(delta),
+                        systemImage: delta == 0 ? "checkmark.circle.fill" : "exclamationmark.triangle.fill"
+                    )
+                    .font(.footnote.bold())
+                    .monospacedDigit()
+                    .foregroundStyle(delta == 0 ? OutcomeTheme.Colors.income : OutcomeTheme.Colors.discrepancy)
+                } else {
+                    Text("Nhập số dư để tính chênh lệch")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
+            }
         }
-        .padding(14)
+        .padding(16)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(surface, in: .rect(cornerRadius: OutcomeTheme.Layout.tileRadius))
     }
@@ -150,27 +229,35 @@ struct WalletsReconcileView: View {
     private var noteAndActionCard: some View {
         VStack(spacing: 12) {
             TextField("Ghi chú chốt sổ (tùy chọn)", text: $reconcileNote)
+                .focused($focusedField, equals: .note)
+                .submitLabel(.done)
+                .onSubmit { focusedField = nil }
                 .padding(14)
                 .frame(minHeight: OutcomeTheme.Layout.minTouchTarget)
                 .background(OutcomeTheme.Colors.card, in: .rect(cornerRadius: OutcomeTheme.Layout.chipRadius))
 
             Button {
+                guard let mb = parsedMbActual, let momo = parsedMomoActual else { return }
+                focusedField = nil
                 reconcileTrigger += 1
                 coordinator.reconcileBalances(
-                    mbActual: mbActualInput,
-                    momoActual: momoActualInput,
+                    mbActual: mb,
+                    momoActual: momo,
                     note: reconcileNote
                 )
                 reconcileNote = ""
             } label: {
                 Text("Chốt số dư thực tế")
                     .font(.headline)
-                    .foregroundStyle(.white)
+                    .foregroundStyle(canCommit ? .white : .secondary)
                     .frame(maxWidth: .infinity, minHeight: OutcomeTheme.Layout.primaryButtonHeight)
-                    .background(OutcomeTheme.Colors.accent, in: .capsule)
+                    .background(
+                        canCommit ? OutcomeTheme.Colors.accent : OutcomeTheme.Colors.track,
+                        in: .capsule
+                    )
             }
             .buttonStyle(.plain)
-            .disabled(mbActualInput < 0 || momoActualInput < 0)
+            .disabled(!canCommit)
         }
     }
 
@@ -179,7 +266,10 @@ struct WalletsReconcileView: View {
             Text("Lịch sử đối soát")
                 .font(.headline)
 
-            ForEach(coordinator.reconciliations.prefix(6)) { rec in
+            ForEach(coordinator.reconciliations.prefix(8).enumerated(), id: \.element.id) { idx, rec in
+                if idx > 0 {
+                    Divider()
+                }
                 HStack {
                     VStack(alignment: .leading, spacing: 2) {
                         Text(rec.walletId.displayName)

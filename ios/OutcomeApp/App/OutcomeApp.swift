@@ -6,12 +6,16 @@ import UserNotifications
 final class NotificationCenterDelegate: NSObject, @preconcurrency UNUserNotificationCenterDelegate {
     var onSelectTransactionId: ((String) -> Void)?
     var onOpenReconcile: (() -> Void)?
+    var onReceiveForegroundNotification: (() -> Void)?
 
     nonisolated func userNotificationCenter(
         _ center: UNUserNotificationCenter,
         willPresent notification: UNNotification
     ) async -> UNNotificationPresentationOptions {
-        [.banner, .sound]
+        await MainActor.run {
+            self.onReceiveForegroundNotification?()
+        }
+        return [.banner, .sound]
     }
 
     nonisolated func userNotificationCenter(
@@ -48,6 +52,9 @@ struct OutcomeApp: App {
                     }
                     notificationDelegate.onOpenReconcile = {
                         coordinator.selectedTab = .wallets
+                    }
+                    notificationDelegate.onReceiveForegroundNotification = {
+                        coordinator.refresh()
                     }
                     UNUserNotificationCenter.current().delegate = notificationDelegate
                     await ReminderScheduler.requestAuthorizationIfNeeded()

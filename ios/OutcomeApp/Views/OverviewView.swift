@@ -5,19 +5,24 @@ struct OverviewView: View {
     @Environment(AppCoordinator.self) private var coordinator
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     @State private var selectedWalletFilter: WalletId?
+    @State private var isShowingAllTransactions: Bool = false
     @State private var pendingDeletion: OutcomeCore.Transaction?
 
-    private var filteredRecentTransactions: [OutcomeCore.Transaction] {
+    private var allFilteredTransactions: [OutcomeCore.Transaction] {
         let base = coordinator.allTransactions
-        let filtered: [OutcomeCore.Transaction]
         if let walletId = selectedWalletFilter {
-            filtered = base.filter {
+            return base.filter {
                 $0.sourceWalletId == walletId || $0.targetWalletId == walletId
             }
-        } else {
-            filtered = base
         }
-        return Array(filtered.prefix(12))
+        return base
+    }
+
+    private var visibleTransactions: [OutcomeCore.Transaction] {
+        if isShowingAllTransactions {
+            return allFilteredTransactions
+        }
+        return Array(allFilteredTransactions.prefix(12))
     }
 
     private var currentMonthNumber: Int {
@@ -34,6 +39,7 @@ struct OverviewView: View {
 
                     SpendingAllocationCard(
                         monthlyExpense: coordinator.summary.monthlyExpense,
+                        monthlyIncome: coordinator.summary.monthlyIncome,
                         expenseByTag: coordinator.summary.expenseByTag,
                         monthNumber: currentMonthNumber
                     )
@@ -41,7 +47,11 @@ struct OverviewView: View {
                     recentActivitySection
                 }
                 .padding(.horizontal, OutcomeTheme.Layout.horizontalPadding)
-                .padding(.vertical, 12)
+                .padding(.top, 12)
+                .padding(.bottom, 28)
+            }
+            .refreshable {
+                coordinator.refresh()
             }
             .background(OutcomeTheme.Colors.canvas)
             .navigationTitle("Tổng quan")
@@ -89,9 +99,11 @@ struct OverviewView: View {
                     .bold()
                     .monospacedDigit()
                     .foregroundStyle(.primary)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.65)
             }
 
-            Spacer()
+            Spacer(minLength: 8)
 
             if coordinator.summary.pendingCount > 0 {
                 Button {
@@ -105,6 +117,7 @@ struct OverviewView: View {
                         .background(OutcomeTheme.Colors.accent, in: .capsule)
                 }
                 .buttonStyle(.plain)
+                .fixedSize()
                 .accessibilityLabel("Mở \(coordinator.summary.pendingCount) giao dịch chờ gắn tag")
             }
         }
@@ -124,6 +137,7 @@ struct OverviewView: View {
                     } else {
                         selectedWalletFilter = wallet.id
                     }
+                    isShowingAllTransactions = false
                 }
                 .overlay {
                     if selectedWalletFilter == wallet.id {
@@ -147,13 +161,14 @@ struct OverviewView: View {
                 if selectedWalletFilter != nil {
                     Button("Hiện tất cả") {
                         selectedWalletFilter = nil
+                        isShowingAllTransactions = false
                     }
                     .font(.footnote.bold())
                     .frame(minHeight: OutcomeTheme.Layout.minTouchTarget)
                 }
             }
 
-            if filteredRecentTransactions.isEmpty {
+            if visibleTransactions.isEmpty {
                 ContentUnavailableView(
                     "Chưa có giao dịch",
                     systemImage: "tray",
@@ -162,8 +177,12 @@ struct OverviewView: View {
                 .frame(maxWidth: .infinity)
                 .padding(.vertical, 20)
             } else {
-                VStack(spacing: 12) {
-                    ForEach(filteredRecentTransactions) { tx in
+                VStack(spacing: 10) {
+                    ForEach(visibleTransactions.enumerated(), id: \.element.id) { idx, tx in
+                        if idx > 0 {
+                            Divider()
+                                .padding(.leading, 50)
+                        }
                         Button {
                             if tx.txType != .internalTransfer {
                                 coordinator.activeTaggingTransaction = tx
@@ -187,6 +206,19 @@ struct OverviewView: View {
                         }
                     }
                 }
+
+                if allFilteredTransactions.count > 12 {
+                    Button {
+                        isShowingAllTransactions.toggle()
+                    } label: {
+                        Text(isShowingAllTransactions ? "Thu gọn" : "Xem tất cả (\(allFilteredTransactions.count))")
+                            .font(.footnote.bold())
+                            .foregroundStyle(OutcomeTheme.Colors.accent)
+                            .frame(maxWidth: .infinity, minHeight: OutcomeTheme.Layout.minTouchTarget)
+                    }
+                    .buttonStyle(.plain)
+                    .padding(.top, 4)
+                }
             }
         }
         .padding(16)
@@ -198,6 +230,7 @@ struct OverviewView: View {
             coordinator.isPresentingManualEntry = true
         }
         .labelStyle(.iconOnly)
+        .tint(OutcomeTheme.Colors.accent)
         .modifier(GlassProminentButtonModifier())
     }
 }

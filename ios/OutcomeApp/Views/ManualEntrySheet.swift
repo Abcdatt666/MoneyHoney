@@ -2,12 +2,19 @@ import OutcomeCore
 import SwiftUI
 
 struct ManualEntrySheet: View {
+    private enum Field: Hashable {
+        case amount
+        case description
+        case note
+    }
+
     @Environment(AppCoordinator.self) private var coordinator
     @Environment(\.dismiss) private var dismiss
+    @FocusState private var focusedField: Field?
 
     @State private var walletId: WalletId = .momo
     @State private var direction: Direction = .out
-    @State private var amount: Int?
+    @State private var amountText: String = ""
     @State private var selectedTagId: String? = "tag_an_uong"
     @State private var descriptionText: String = ""
     @State private var noteText: String = ""
@@ -15,8 +22,14 @@ struct ManualEntrySheet: View {
     @State private var newTagName: String = ""
     @State private var saveTrigger: Int = 0
 
+    private var parsedAmount: Int? {
+        let digits = amountText.filter(\.isNumber)
+        guard !digits.isEmpty, let value = Int(digits), value > 0 else { return nil }
+        return value
+    }
+
     private var canSave: Bool {
-        (amount ?? 0) > 0 && selectedTagId != nil
+        parsedAmount != nil && selectedTagId != nil
     }
 
     var body: some View {
@@ -37,21 +50,51 @@ struct ManualEntrySheet: View {
                     .pickerStyle(.segmented)
 
                     VStack(alignment: .leading, spacing: 6) {
-                        Text("Số tiền (VND)")
-                            .font(.footnote.bold())
-                            .foregroundStyle(.secondary)
+                        HStack {
+                            Text("Số tiền (VND)")
+                                .font(.footnote.bold())
+                                .foregroundStyle(.secondary)
 
-                        TextField("0", value: $amount, format: .number)
-                            .keyboardType(.numberPad)
-                            .font(.system(.title2, design: .rounded))
-                            .bold()
-                            .monospacedDigit()
-                            .padding(14)
-                            .frame(minHeight: OutcomeTheme.Layout.minTouchTarget)
-                            .background(
-                                OutcomeTheme.Colors.card,
-                                in: .rect(cornerRadius: OutcomeTheme.Layout.chipRadius)
-                            )
+                            Spacer()
+
+                            if let parsedAmount {
+                                Text(VNDFormatter.formatSigned(parsedAmount, direction: direction))
+                                    .font(.footnote.bold())
+                                    .monospacedDigit()
+                                    .foregroundStyle(direction == .in ? OutcomeTheme.Colors.income : OutcomeTheme.Colors.accent)
+                            }
+                        }
+
+                        HStack(spacing: 8) {
+                            TextField("Nhập số tiền, ví dụ 50000", text: $amountText)
+                                .keyboardType(.numberPad)
+                                .focused($focusedField, equals: .amount)
+                                .font(.system(.title2, design: .rounded))
+                                .bold()
+                                .monospacedDigit()
+                                .onChange(of: amountText) { _, newValue in
+                                    let digits = String(newValue.filter(\.isNumber).prefix(12))
+                                    if digits != newValue {
+                                        amountText = digits
+                                    }
+                                }
+
+                            if !amountText.isEmpty {
+                                Button("Xóa số tiền", systemImage: "xmark.circle.fill") {
+                                    amountText = ""
+                                }
+                                .labelStyle(.iconOnly)
+                                .foregroundStyle(.secondary)
+                                .frame(minWidth: OutcomeTheme.Layout.minTouchTarget, minHeight: OutcomeTheme.Layout.minTouchTarget)
+                            }
+                        }
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 6)
+                        .frame(minHeight: 54)
+                        .background(
+                            OutcomeTheme.Colors.card,
+                            in: .rect(cornerRadius: OutcomeTheme.Layout.chipRadius)
+                        )
                     }
 
                     VStack(alignment: .leading, spacing: 8) {
@@ -62,7 +105,11 @@ struct ManualEntrySheet: View {
                         TagGridSelector(
                             tags: coordinator.tags,
                             selectedTagId: $selectedTagId,
+                            onSelectTag: {
+                                focusedField = nil
+                            },
                             onTapCreateTag: {
+                                focusedField = nil
                                 newTagName = ""
                                 isShowingNewTagAlert = true
                             }
@@ -71,6 +118,9 @@ struct ManualEntrySheet: View {
 
                     VStack(spacing: 10) {
                         TextField("Nội dung (ví dụ: Cơm trưa)", text: $descriptionText)
+                            .focused($focusedField, equals: .description)
+                            .submitLabel(.next)
+                            .onSubmit { focusedField = .note }
                             .padding(14)
                             .frame(minHeight: OutcomeTheme.Layout.minTouchTarget)
                             .background(
@@ -79,6 +129,9 @@ struct ManualEntrySheet: View {
                             )
 
                         TextField("Ghi chú (tùy chọn)", text: $noteText)
+                            .focused($focusedField, equals: .note)
+                            .submitLabel(.done)
+                            .onSubmit { focusedField = nil }
                             .padding(14)
                             .frame(minHeight: OutcomeTheme.Layout.minTouchTarget)
                             .background(
@@ -88,21 +141,25 @@ struct ManualEntrySheet: View {
                     }
                 }
                 .padding(.horizontal, OutcomeTheme.Layout.horizontalPadding)
-                .padding(.vertical, 12)
+                .padding(.top, 12)
+                .padding(.bottom, 24)
             }
+            .scrollDismissesKeyboard(.interactively)
             .background(OutcomeTheme.Colors.canvas)
             .navigationTitle("Nhập giao dịch")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Hủy") {
+                        focusedField = nil
                         dismiss()
                     }
                 }
 
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Lưu") {
-                        guard let amount, amount > 0, let tagId = selectedTagId else { return }
+                        guard let amount = parsedAmount, let tagId = selectedTagId else { return }
+                        focusedField = nil
                         saveTrigger += 1
                         coordinator.addManualTransaction(
                             walletId: walletId,
@@ -116,6 +173,14 @@ struct ManualEntrySheet: View {
                     }
                     .disabled(!canSave)
                 }
+
+                ToolbarItemGroup(placement: .keyboard) {
+                    Spacer()
+                    Button("Xong") {
+                        focusedField = nil
+                    }
+                    .bold()
+                }
             }
             .sensoryFeedback(.success, trigger: saveTrigger)
             .alert("Tạo tag mới", isPresented: $isShowingNewTagAlert) {
@@ -128,6 +193,7 @@ struct ManualEntrySheet: View {
                 Button("Hủy", role: .cancel) {}
             }
         }
+        .presentationBackground(OutcomeTheme.Colors.canvas)
         .presentationDetents([.large])
         .presentationDragIndicator(.visible)
     }

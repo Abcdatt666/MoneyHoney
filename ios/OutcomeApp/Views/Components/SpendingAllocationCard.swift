@@ -4,6 +4,7 @@ import SwiftUI
 
 struct SpendingAllocationCard: View {
     let monthlyExpense: Int
+    let monthlyIncome: Int
     let expenseByTag: [String: Int]
     let monthNumber: Int
 
@@ -22,7 +23,7 @@ struct SpendingAllocationCard: View {
             .sorted { $0.value > $1.value }
 
         return sorted.enumerated().map { idx, entry in
-            let pct = Int((Double(entry.value) / Double(monthlyExpense) * 100.0).rounded())
+            let pct = max(1, Int((Double(entry.value) / Double(monthlyExpense) * 100.0).rounded()))
             let color = OutcomeTheme.chartPalette[idx % OutcomeTheme.chartPalette.count]
             return TagSlice(
                 id: entry.key,
@@ -36,15 +37,31 @@ struct SpendingAllocationCard: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            HStack(alignment: .firstTextBaseline) {
-                Text("Chi tiêu tháng \(monthNumber)")
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Text("Tháng \(monthNumber)")
                     .font(.headline)
                     .foregroundStyle(.primary)
 
                 Spacer()
 
+                if monthlyIncome > 0 {
+                    Text("Thu +\(VNDFormatter.format(monthlyIncome))")
+                        .font(.footnote.bold())
+                        .monospacedDigit()
+                        .foregroundStyle(OutcomeTheme.Colors.income)
+                        .lineLimit(1)
+                }
+            }
+
+            HStack(alignment: .firstTextBaseline) {
+                Text("Đã chi")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+
+                Spacer()
+
                 Text(VNDFormatter.format(monthlyExpense))
-                    .font(.headline.bold())
+                    .font(.title3.bold())
                     .monospacedDigit()
                     .foregroundStyle(.primary)
             }
@@ -57,24 +74,24 @@ struct SpendingAllocationCard: View {
                 Chart(slices) { slice in
                     BarMark(
                         x: .value("Số tiền", slice.amount),
-                        y: .value("Tháng", "Chi tiêu")
+                        y: .value("Tháng", "Chi tiêu"),
+                        height: .fixed(14),
+                        stacking: .normalized
                     )
                     .foregroundStyle(slice.color)
                 }
                 .chartXAxis(.hidden)
                 .chartYAxis(.hidden)
                 .chartLegend(.hidden)
-                .chartXScale(domain: 0...max(monthlyExpense, 1))
+                .chartPlotStyle { plotArea in
+                    plotArea.frame(height: 14)
+                }
                 .frame(height: 14)
                 .clipShape(.capsule)
                 .accessibilityLabel("Biểu đồ phân bổ chi tiêu theo tag")
 
-                LazyVGrid(
-                    columns: [GridItem(.adaptive(minimum: 112), alignment: .leading)],
-                    alignment: .leading,
-                    spacing: 8
-                ) {
-                    ForEach(slices.prefix(4)) { slice in
+                FlowLayout(horizontalSpacing: 8, verticalSpacing: 8) {
+                    ForEach(slices) { slice in
                         HStack(spacing: 6) {
                             Circle()
                                 .fill(slice.color)

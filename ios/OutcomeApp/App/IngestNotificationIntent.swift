@@ -38,7 +38,7 @@ struct IngestNotificationIntent: AppIntent {
     var notificationBody: String
 
     @MainActor
-    func perform() async throws -> some IntentResult & ProvidesDialog {
+    func perform() async throws -> some IntentResult {
         let store = SwiftDataExpenseStore()
         let engine = ExpenseEngine(store: store)
         let raw = RawNotification(
@@ -49,17 +49,12 @@ struct IngestNotificationIntent: AppIntent {
         )
         let result = engine.ingestNotification(raw)
 
-        switch result.status {
-        case .created:
-            if let prompt = result.prompt, prompt.shouldPrompt {
-                await ReminderScheduler.scheduleTransactionPrompt(prompt)
-                return .result(dialog: "\(prompt.title)")
-            }
-            return .result(dialog: "Đã ghi nhận chuyển tiền nội bộ.")
-        case .duplicate:
-            return .result(dialog: "Giao dịch trùng lặp đã được bỏ qua.")
-        case .ignored:
-            return .result(dialog: "Không phải thông báo giao dịch hợp lệ.")
+        if result.status == .created,
+           let prompt = result.prompt,
+           prompt.shouldPrompt {
+            await ReminderScheduler.scheduleTransactionPrompt(prompt)
         }
+
+        return .result()
     }
 }

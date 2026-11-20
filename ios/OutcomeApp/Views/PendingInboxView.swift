@@ -3,6 +3,7 @@ import SwiftUI
 
 struct PendingInboxView: View {
     @Environment(AppCoordinator.self) private var coordinator
+    @State private var pendingDeletion: OutcomeCore.Transaction?
 
     private var recentInternalTransfers: [OutcomeCore.Transaction] {
         coordinator.allTransactions
@@ -36,6 +37,14 @@ struct PendingInboxView: View {
                                     pendingCard(for: tx)
                                 }
                                 .buttonStyle(.plain)
+                                .contextMenu {
+                                    Button("Chọn tag & ghi chú", systemImage: "tag") {
+                                        coordinator.activeTaggingTransaction = tx
+                                    }
+                                    Button("Xóa giao dịch", systemImage: "trash", role: .destructive) {
+                                        pendingDeletion = tx
+                                    }
+                                }
                             }
                         }
                     }
@@ -55,16 +64,49 @@ struct PendingInboxView: View {
                                             OutcomeTheme.Colors.card.opacity(0.75),
                                             in: .rect(cornerRadius: OutcomeTheme.Layout.cardRadius)
                                         )
+                                        .contextMenu {
+                                            Button("Xóa giao dịch", systemImage: "trash", role: .destructive) {
+                                                pendingDeletion = tx
+                                            }
+                                        }
                                 }
                             }
                         }
                     }
                 }
                 .padding(.horizontal, OutcomeTheme.Layout.horizontalPadding)
-                .padding(.vertical, 12)
+                .padding(.top, 12)
+                .padding(.bottom, 28)
+            }
+            .refreshable {
+                coordinator.refresh()
             }
             .background(OutcomeTheme.Colors.canvas)
             .navigationTitle("Chờ duyệt")
+            .confirmationDialog(
+                "Xóa giao dịch này?",
+                isPresented: Binding(
+                    get: { pendingDeletion != nil },
+                    set: { isPresented in
+                        if !isPresented { pendingDeletion = nil }
+                    }
+                ),
+                titleVisibility: .visible
+            ) {
+                Button("Xóa và hoàn số dư", role: .destructive) {
+                    if let tx = pendingDeletion {
+                        coordinator.deleteTransaction(txId: tx.id)
+                    }
+                    pendingDeletion = nil
+                }
+                Button("Hủy", role: .cancel) {
+                    pendingDeletion = nil
+                }
+            } message: {
+                if let tx = pendingDeletion {
+                    Text("\(tx.description) · \(VNDFormatter.format(tx.amount))")
+                }
+            }
         }
     }
 
@@ -90,6 +132,7 @@ struct PendingInboxView: View {
                     .font(.footnote)
                     .monospacedDigit()
                     .foregroundStyle(.secondary)
+                    .lineLimit(1)
             }
 
             Spacer(minLength: 8)
@@ -99,6 +142,7 @@ struct PendingInboxView: View {
                     .font(.subheadline.bold())
                     .monospacedDigit()
                     .foregroundStyle(tx.direction == .in ? OutcomeTheme.Colors.income : .primary)
+                    .lineLimit(1)
 
                 Text("Chạm chọn")
                     .font(.footnote.bold())

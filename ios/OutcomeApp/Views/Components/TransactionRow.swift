@@ -23,6 +23,9 @@ struct TransactionRow: View {
         let statusOrTag = item.status == .pending
             ? "Chờ gắn tag"
             : (tagName ?? "Đã phân loại")
+        if !item.note.isEmpty {
+            return "\(item.sourceWalletId.displayName) · \(statusOrTag) · \(item.note)"
+        }
         return "\(item.sourceWalletId.displayName) · \(statusOrTag)"
     }
 
@@ -68,11 +71,13 @@ struct TransactionRow: View {
                     .font(.subheadline.bold())
                     .monospacedDigit()
                     .foregroundStyle(amountStyle)
+                    .lineLimit(1)
 
-                Text(item.occurredAt, format: .dateTime.hour().minute())
+                Text(item.occurredAt, format: .dateTime.day().month().hour().minute())
                     .font(.footnote)
                     .monospacedDigit()
                     .foregroundStyle(.tertiary)
+                    .lineLimit(1)
             }
         }
         .frame(minHeight: OutcomeTheme.Layout.minTouchTarget)
