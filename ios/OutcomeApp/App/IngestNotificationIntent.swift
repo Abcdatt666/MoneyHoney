@@ -52,7 +52,8 @@ struct IngestNotificationIntent: AppIntent {
         if result.status == .created,
            let prompt = result.prompt,
            prompt.shouldPrompt {
-            await ReminderScheduler.scheduleTransactionPrompt(prompt)
+            let suggestedTags = result.transaction.map { engine.suggestTags(for: $0, limit: 3) } ?? []
+            await ReminderScheduler.scheduleTransactionPrompt(prompt, suggestedTags: suggestedTags)
         }
 
         return .result()

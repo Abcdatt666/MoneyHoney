@@ -6,7 +6,13 @@ struct SpendingAllocationCard: View {
     let monthlyExpense: Int
     let monthlyIncome: Int
     let expenseByTag: [String: Int]
-    let monthNumber: Int
+    let monthLabel: String
+    let canGoNextMonth: Bool
+    var hideBalance: Bool = false
+    var selectedTagName: String? = nil
+    let onPreviousMonth: () -> Void
+    let onNextMonth: () -> Void
+    var onSelectTagName: ((String) -> Void)? = nil
 
     private struct TagSlice: Identifiable {
         let id: String
@@ -37,21 +43,45 @@ struct SpendingAllocationCard: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            HStack(alignment: .firstTextBaseline, spacing: 8) {
-                Text("Tháng \(monthNumber)")
-                    .font(.headline)
-                    .foregroundStyle(.primary)
+            HStack(spacing: 4) {
+                Button("Tháng trước", systemImage: "chevron.left", action: onPreviousMonth)
+                    .labelStyle(.iconOnly)
+                    .font(.footnote.bold())
+                    .foregroundStyle(.secondary)
+                    .frame(
+                        minWidth: OutcomeTheme.Layout.minTouchTarget,
+                        minHeight: OutcomeTheme.Layout.minTouchTarget
+                    )
+                    .buttonStyle(.plain)
 
-                Spacer()
+                Text(monthLabel)
+                    .font(.headline)
+                    .monospacedDigit()
+                    .foregroundStyle(.primary)
+                    .lineLimit(1)
+
+                Button("Tháng sau", systemImage: "chevron.right", action: onNextMonth)
+                    .labelStyle(.iconOnly)
+                    .font(.footnote.bold())
+                    .foregroundStyle(Color.secondary.opacity(canGoNextMonth ? 1 : 0.35))
+                    .frame(
+                        minWidth: OutcomeTheme.Layout.minTouchTarget,
+                        minHeight: OutcomeTheme.Layout.minTouchTarget
+                    )
+                    .buttonStyle(.plain)
+                    .disabled(!canGoNextMonth)
+
+                Spacer(minLength: 4)
 
                 if monthlyIncome > 0 {
-                    Text("Thu +\(VNDFormatter.format(monthlyIncome))")
+                    Text(hideBalance ? "Thu ••••" : "Thu +\(VNDFormatter.format(monthlyIncome))")
                         .font(.footnote.bold())
                         .monospacedDigit()
                         .foregroundStyle(OutcomeTheme.Colors.income)
                         .lineLimit(1)
                 }
             }
+            .padding(.horizontal, -10)
 
             HStack(alignment: .firstTextBaseline) {
                 Text("Đã chi")
@@ -60,7 +90,7 @@ struct SpendingAllocationCard: View {
 
                 Spacer()
 
-                Text(VNDFormatter.format(monthlyExpense))
+                Text(hideBalance ? "••••••••" : VNDFormatter.format(monthlyExpense))
                     .font(.title3.bold())
                     .monospacedDigit()
                     .foregroundStyle(.primary)
@@ -92,20 +122,30 @@ struct SpendingAllocationCard: View {
 
                 FlowLayout(horizontalSpacing: 8, verticalSpacing: 8) {
                     ForEach(slices) { slice in
-                        HStack(spacing: 6) {
-                            Circle()
-                                .fill(slice.color)
-                                .frame(width: 8, height: 8)
-                                .accessibilityHidden(true)
+                        let isSelected = selectedTagName == slice.name
+                        Button {
+                            onSelectTagName?(slice.name)
+                        } label: {
+                            HStack(spacing: 6) {
+                                Circle()
+                                    .fill(isSelected ? .white : slice.color)
+                                    .frame(width: 8, height: 8)
+                                    .accessibilityHidden(true)
 
-                            Text("\(slice.name) · \(slice.sharePercent)%")
-                                .font(.footnote)
-                                .foregroundStyle(.secondary)
-                                .lineLimit(1)
+                                Text("\(slice.name) · \(slice.sharePercent)%")
+                                    .font(.footnote.weight(isSelected ? .semibold : .regular))
+                                    .foregroundStyle(isSelected ? Color.white : Color.secondary)
+                                    .lineLimit(1)
+                            }
+                            .padding(.horizontal, 12)
+                            .frame(minHeight: OutcomeTheme.Layout.minTouchTarget)
+                            .background(
+                                isSelected ? OutcomeTheme.Colors.accent : OutcomeTheme.Colors.track,
+                                in: .capsule
+                            )
                         }
-                        .padding(.horizontal, 10)
-                        .padding(.vertical, 6)
-                        .background(OutcomeTheme.Colors.track, in: .capsule)
+                        .buttonStyle(.plain)
+                        .accessibilityAddTraits(isSelected ? .isSelected : [])
                     }
                 }
             }

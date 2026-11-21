@@ -86,11 +86,111 @@ final class NotificationParserTests: XCTestCase {
         XCTAssertEqual(parsed.description, "Trần Minh Quân - Tiền cafe sáng")
     }
 
+    func testMoMoAllRealPopupFormats() throws {
+        let r1 = try XCTUnwrap(NotificationParser.parse(RawNotification(
+            sourceApp: .momo,
+            title: "Bạn vừa nhận được tiền",
+            body: "Bạn vừa nhận được 120.000đ từ Nguyễn Văn A (0901234567). Lời nhắn: \"Tiền ăn trưa\"",
+            receivedAt: ts
+        )))
+        XCTAssertEqual(r1.txType, .income)
+        XCTAssertEqual(r1.amount, 120_000)
+        XCTAssertEqual(r1.description, "Nguyễn Văn A - Tiền ăn trưa")
+
+        let r2 = try XCTUnwrap(NotificationParser.parse(RawNotification(
+            sourceApp: .momo,
+            title: "Nhận tiền thành công",
+            body: "Bạn vừa nhận được 500.000đ từ NGUYEN VAN B qua VietQR/Chuyển tiền nhanh.",
+            receivedAt: ts
+        )))
+        XCTAssertEqual(r2.txType, .income)
+        XCTAssertEqual(r2.amount, 500_000)
+        XCTAssertEqual(r2.description, "NGUYEN VAN B")
+
+        let r3 = try XCTUnwrap(NotificationParser.parse(RawNotification(
+            sourceApp: .momo,
+            title: "Thanh toán thành công",
+            body: "Bạn đã thanh toán thành công 199.000đ cho dịch vụ Apple Services.",
+            receivedAt: ts
+        )))
+        XCTAssertEqual(r3.txType, .expense)
+        XCTAssertEqual(r3.direction, .out)
+        XCTAssertEqual(r3.amount, 199_000)
+        XCTAssertEqual(r3.description, "Apple Services")
+
+        let r4 = try XCTUnwrap(NotificationParser.parse(RawNotification(
+            sourceApp: .momo,
+            title: "",
+            body: "Bạn vừa được hoàn 50.000đ từ giao dịch Shopee vào Ví MoMo.",
+            receivedAt: ts
+        )))
+        XCTAssertEqual(r4.txType, .income)
+        XCTAssertEqual(r4.direction, .in)
+        XCTAssertEqual(r4.amount, 50_000)
+        XCTAssertEqual(r4.description, "Hoàn tiền - Shopee")
+
+        let r5 = try XCTUnwrap(NotificationParser.parse(RawNotification(
+            sourceApp: .momo,
+            title: "Tiền lời Túi Thần Tài",
+            body: "Chúc mừng bạn nhận được 1.250đ tiền lời hôm nay từ Túi Thần Tài.",
+            receivedAt: ts
+        )))
+        XCTAssertEqual(r5.txType, .income)
+        XCTAssertEqual(r5.amount, 1_250)
+        XCTAssertEqual(r5.description, "Tiền lời Túi Thần Tài")
+
+        let r6 = try XCTUnwrap(NotificationParser.parse(RawNotification(
+            sourceApp: .momo,
+            title: "Chuyển tiền thành công",
+            body: "Bạn đã chuyển 85.000đ cho Lê Minh Khôi (0912345678). Lời nhắn: \"Hoàn tiền cafe\"",
+            receivedAt: ts
+        )))
+        XCTAssertEqual(r6.txType, .expense)
+        XCTAssertEqual(r6.amount, 85_000)
+        XCTAssertEqual(r6.description, "Chuyển Lê Minh Khôi")
+
+        let r7 = try XCTUnwrap(NotificationParser.parse(RawNotification(
+            sourceApp: .momo,
+            title: "Thanh toán thành công",
+            body: "Thanh toán thành công 45.000đ tại Highlands Coffee.",
+            receivedAt: ts
+        )))
+        XCTAssertEqual(r7.txType, .expense)
+        XCTAssertEqual(r7.amount, 45_000)
+        XCTAssertEqual(r7.description, "Highlands Coffee")
+
+        let r8 = try XCTUnwrap(NotificationParser.parse(RawNotification(
+            sourceApp: .momo,
+            title: "Nạp tiền điện thoại thành công",
+            body: "Bạn đã nạp tiền điện thoại 50.000đ cho thuê bao 0901234567.",
+            receivedAt: ts
+        )))
+        XCTAssertEqual(r8.txType, .expense)
+        XCTAssertEqual(r8.direction, .out)
+        XCTAssertEqual(r8.amount, 50_000)
+
+        let r9 = try XCTUnwrap(NotificationParser.parse(RawNotification(
+            sourceApp: .momo,
+            title: "Bạn vừa nhận được tiền",
+            body: "Bạn vừa nhận được 70.000đ từ Phạm Anh (0988111222). Lời nhắn: \"Chia tiền voucher\"",
+            receivedAt: ts
+        )))
+        XCTAssertEqual(r9.txType, .income)
+        XCTAssertEqual(r9.amount, 70_000)
+        XCTAssertEqual(r9.description, "Phạm Anh - Chia tiền voucher")
+    }
+
     func testIgnoresPromotionalAndOTPNotifications() {
         let promo = RawNotification(
             sourceApp: .momo,
             title: "Ưu đãi cực sốc",
             body: "Nhận ngay voucher giảm giá 50.000đ khi mua trà sữa hôm nay!",
+            receivedAt: ts
+        )
+        let giftCardPromo = RawNotification(
+            sourceApp: .momo,
+            title: "Quà tặng dành riêng cho bạn",
+            body: "Chúc mừng bạn nhận được thẻ quà 50.000đ thanh toán hóa đơn!",
             receivedAt: ts
         )
         let otp = RawNotification(
@@ -100,6 +200,7 @@ final class NotificationParserTests: XCTestCase {
             receivedAt: ts
         )
         XCTAssertNil(NotificationParser.parse(promo))
+        XCTAssertNil(NotificationParser.parse(giftCardPromo))
         XCTAssertNil(NotificationParser.parse(otp))
     }
 }

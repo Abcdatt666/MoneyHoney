@@ -100,11 +100,146 @@ class TestParser(unittest.TestCase):
         self.assertEqual(parsed.amount, 120000)
         self.assertEqual(parsed.description, "Trần Minh Quân - Tiền cafe sáng")
 
+    def test_momo_all_real_popup_formats(self) -> None:
+        # 1) Nhận tiền từ ví MoMo (kèm SĐT và lời nhắn ngoặc kép)
+        r1 = parse_notification(
+            RawNotification(
+                source_app=WalletId.MOMO,
+                title="Bạn vừa nhận được tiền",
+                body='Bạn vừa nhận được 120.000đ từ Nguyễn Văn A (0901234567). Lời nhắn: "Tiền ăn trưa"',
+                received_at=self.ts,
+            )
+        )
+        assert r1 is not None
+        self.assertEqual(r1.tx_type, TransactionType.INCOME)
+        self.assertEqual(r1.amount, 120000)
+        self.assertEqual(r1.description, "Nguyễn Văn A - Tiền ăn trưa")
+
+        # 2) Nhận tiền từ Ngân hàng qua VietQR
+        r2 = parse_notification(
+            RawNotification(
+                source_app=WalletId.MOMO,
+                title="Nhận tiền thành công",
+                body="Bạn vừa nhận được 500.000đ từ NGUYEN VAN B qua VietQR/Chuyển tiền nhanh.",
+                received_at=self.ts,
+            )
+        )
+        assert r2 is not None
+        self.assertEqual(r2.tx_type, TransactionType.INCOME)
+        self.assertEqual(r2.amount, 500000)
+        self.assertEqual(r2.description, "NGUYEN VAN B")
+
+        # 3) Trừ tiền tự động (Liên kết Apple Services / Grab)
+        r3 = parse_notification(
+            RawNotification(
+                source_app=WalletId.MOMO,
+                title="Thanh toán thành công",
+                body="Bạn đã thanh toán thành công 199.000đ cho dịch vụ Apple Services.",
+                received_at=self.ts,
+            )
+        )
+        assert r3 is not None
+        self.assertEqual(r3.tx_type, TransactionType.EXPENSE)
+        self.assertEqual(r3.direction, Direction.OUT)
+        self.assertEqual(r3.amount, 199000)
+        self.assertEqual(r3.description, "Apple Services")
+
+        # 4) Hoàn tiền (kể cả khi Shortcuts không truyền Title)
+        r4 = parse_notification(
+            RawNotification(
+                source_app=WalletId.MOMO,
+                title="",
+                body="Bạn vừa được hoàn 50.000đ từ giao dịch Shopee vào Ví MoMo.",
+                received_at=self.ts,
+            )
+        )
+        assert r4 is not None
+        self.assertEqual(r4.tx_type, TransactionType.INCOME)
+        self.assertEqual(r4.direction, Direction.IN)
+        self.assertEqual(r4.amount, 50000)
+        self.assertEqual(r4.description, "Hoàn tiền - Shopee")
+
+        # 5) Tiền lời Túi Thần Tài
+        r5 = parse_notification(
+            RawNotification(
+                source_app=WalletId.MOMO,
+                title="Tiền lời Túi Thần Tài",
+                body="Chúc mừng bạn nhận được 1.250đ tiền lời hôm nay từ Túi Thần Tài.",
+                received_at=self.ts,
+            )
+        )
+        assert r5 is not None
+        self.assertEqual(r5.tx_type, TransactionType.INCOME)
+        self.assertEqual(r5.amount, 1250)
+        self.assertEqual(r5.description, "Tiền lời Túi Thần Tài")
+
+        # 6) Chuyển tiền đi từ MoMo (kể cả khi Lời nhắn chứa chữ "hoàn tiền")
+        r6 = parse_notification(
+            RawNotification(
+                source_app=WalletId.MOMO,
+                title="Chuyển tiền thành công",
+                body='Bạn đã chuyển 85.000đ cho Lê Minh Khôi (0912345678). Lời nhắn: "Hoàn tiền cafe"',
+                received_at=self.ts,
+            )
+        )
+        assert r6 is not None
+        self.assertEqual(r6.tx_type, TransactionType.EXPENSE)
+        self.assertEqual(r6.amount, 85000)
+        self.assertEqual(r6.description, "Chuyển Lê Minh Khôi")
+
+        # 7) Quét QR / Thanh toán tại cửa hàng
+        r7 = parse_notification(
+            RawNotification(
+                source_app=WalletId.MOMO,
+                title="Thanh toán thành công",
+                body="Thanh toán thành công 45.000đ tại Highlands Coffee.",
+                received_at=self.ts,
+            )
+        )
+        assert r7 is not None
+        self.assertEqual(r7.tx_type, TransactionType.EXPENSE)
+        self.assertEqual(r7.amount, 45000)
+        self.assertEqual(r7.description, "Highlands Coffee")
+
+        # 8) Nạp điện thoại (phải là CHI, không nhầm với nạp ví)
+        r8 = parse_notification(
+            RawNotification(
+                source_app=WalletId.MOMO,
+                title="Nạp tiền điện thoại thành công",
+                body="Bạn đã nạp tiền điện thoại 50.000đ cho thuê bao 0901234567.",
+                received_at=self.ts,
+            )
+        )
+        assert r8 is not None
+        self.assertEqual(r8.tx_type, TransactionType.EXPENSE)
+        self.assertEqual(r8.direction, Direction.OUT)
+        self.assertEqual(r8.amount, 50000)
+
+        # 9) Nhận tiền có Lời nhắn chứa từ khóa promo ("voucher") vẫn không bị bỏ sót
+        r9 = parse_notification(
+            RawNotification(
+                source_app=WalletId.MOMO,
+                title="Bạn vừa nhận được tiền",
+                body='Bạn vừa nhận được 70.000đ từ Phạm Anh (0988111222). Lời nhắn: "Chia tiền voucher"',
+                received_at=self.ts,
+            )
+        )
+        assert r9 is not None
+        self.assertEqual(r9.tx_type, TransactionType.INCOME)
+        self.assertEqual(r9.amount, 70000)
+        self.assertEqual(r9.description, "Phạm Anh - Chia tiền voucher")
+
     def test_ignores_promotional_and_otp_notifications(self) -> None:
         promo = RawNotification(
             source_app=WalletId.MOMO,
             title="Ưu đãi cực sốc",
             body="Nhận ngay voucher giảm giá 50.000đ khi mua trà sữa hôm nay!",
+            received_at=self.ts,
+        )
+        gift_card_promo = RawNotification(
+            source_app=WalletId.MOMO,
+            title="Quà tặng dành riêng cho bạn",
+            body="Chúc mừng bạn nhận được thẻ quà 50.000đ thanh toán hóa đơn!",
             received_at=self.ts,
         )
         otp = RawNotification(
@@ -114,6 +249,7 @@ class TestParser(unittest.TestCase):
             received_at=self.ts,
         )
         self.assertIsNone(parse_notification(promo))
+        self.assertIsNone(parse_notification(gift_card_promo))
         self.assertIsNone(parse_notification(otp))
 
 

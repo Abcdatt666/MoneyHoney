@@ -4,45 +4,118 @@ import SwiftUI
 struct OverviewView: View {
     @Environment(AppCoordinator.self) private var coordinator
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
+    @AppStorage("outcome.hideBalances") private var hideBalances: Bool = false
+
     @State private var selectedWalletFilter: WalletId?
+    @State private var selectedTagFilterName: String?
+    @State private var searchText: String = ""
     @State private var isShowingAllTransactions: Bool = false
     @State private var pendingDeletion: OutcomeCore.Transaction?
 
+    private var trimmedSearch: String {
+        searchText.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private var isSearching: Bool {
+        !trimmedSearch.isEmpty
+    }
+
+    private var hasActiveFilter: Bool {
+        selectedWalletFilter != nil || selectedTagFilterName != nil
+    }
+
     private var allFilteredTransactions: [OutcomeCore.Transaction] {
-        let base = coordinator.allTransactions
+        // When typing in search, look across all months so older items are immediately findable.
+        var base = isSearching ? coordinator.allTransactions : coordinator.monthTransactions
+
         if let walletId = selectedWalletFilter {
-            return base.filter {
+            base = base.filter {
                 $0.sourceWalletId == walletId || $0.targetWalletId == walletId
             }
         }
+
+        if let tagFilter = selectedTagFilterName {
+            base = base.filter { tx in
+                guard tx.txType != .internalTransfer else { return false }
+                let resolvedTagName = coordinator.tagName(for: tx.tagId) ?? "Chưa phân loại"
+                return resolvedTagName == tagFilter
+            }
+        }
+
+        if isSearching {
+            let query = trimmedSearch.folding(options: [.diacriticInsensitive, .caseInsensitive], locale: .current)
+            base = base.filter { tx in
+                let tagName = coordinator.tagName(for: tx.tagId) ?? ""
+                let haystack = "\(tx.description) \(tx.note) \(tagName) \(tx.sourceWalletId.displayName) \(tx.amount) \(VNDFormatter.format(tx.amount))"
+                    .folding(options: [.diacriticInsensitive, .caseInsensitive], locale: .current)
+                return haystack.contains(query)
+            }
+        }
+
         return base
     }
 
     private var visibleTransactions: [OutcomeCore.Transaction] {
-        if isShowingAllTransactions {
+        if isShowingAllTransactions || isSearching {
             return allFilteredTransactions
         }
         return Array(allFilteredTransactions.prefix(12))
     }
 
-    private var currentMonthNumber: Int {
-        Calendar.current.component(.month, from: Date())
+    private var activityHeaderTitle: String {
+        if isSearching {
+            return "Kết quả tìm kiếm (\(allFilteredTransactions.count))"
+        }
+        var parts: [String] = []
+        if let wallet = selectedWalletFilter {
+            parts.append(wallet.displayName)
+        }
+        if let tagName = selectedTagFilterName {
+            parts.append(tagName)
+        }
+        if !parts.isEmpty {
+            return "Lọc: \(parts.joined(separator: " · "))"
+        }
+        return "Giao dịch \(coordinator.selectedMonthLabel.lowercased())"
     }
 
     var body: some View {
         NavigationStack {
             ScrollView {
                 VStack(alignment: .leading, spacing: OutcomeTheme.Layout.sectionSpacing) {
-                    heroHeader
+                    if !isSearching {
+                        heroHeader
 
-                    dualWalletRow
+                        dualWalletRow
 
-                    SpendingAllocationCard(
-                        monthlyExpense: coordinator.summary.monthlyExpense,
-                        monthlyIncome: coordinator.summary.monthlyIncome,
-                        expenseByTag: coordinator.summary.expenseByTag,
-                        monthNumber: currentMonthNumber
-                    )
+                        SpendingAllocationCard(
+                            monthlyExpense: coordinator.summary.monthlyExpense,
+                            monthlyIncome: coordinator.summary.monthlyIncome,
+                            expenseByTag: coordinator.summary.expenseByTag,
+                            monthLabel: coordinator.selectedMonthLabel,
+                            canGoNextMonth: coordinator.canGoToNextMonth,
+                            hideBalance: hideBalances,
+                            selectedTagName: selectedTagFilterName,
+                            onPreviousMonth: {
+                                selectedTagFilterName = nil
+                                isShowingAllTransactions = false
+                                coordinator.goToPreviousMonth()
+                            },
+                            onNextMonth: {
+                                selectedTagFilterName = nil
+                                isShowingAllTransactions = false
+                                coordinator.goToNextMonth()
+                            },
+                            onSelectTagName: { tagName in
+                                if selectedTagFilterName == tagName {
+                                    selectedTagFilterName = nil
+                                } else {
+                                    selectedTagFilterName = tagName
+                                }
+                                isShowingAllTransactions = false
+                            }
+                        )
+                    }
 
                     recentActivitySection
                 }
@@ -55,7 +128,11 @@ struct OverviewView: View {
             }
             .background(OutcomeTheme.Colors.canvas)
             .navigationTitle("Tổng quan")
+            .searchable(text: $searchText, prompt: "Tìm nội dung, ghi chú, tag…")
             .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    privacyToggleButton
+                }
                 ToolbarItem(placement: .primaryAction) {
                     addTransactionButton
                 }
@@ -94,13 +171,18 @@ struct OverviewView: View {
                     .font(.footnote)
                     .foregroundStyle(.secondary)
 
-                Text(VNDFormatter.format(coordinator.summary.totalBalance))
+                Text(hideBalances ? "••••••••" : VNDFormatter.format(coordinator.summary.totalBalance))
                     .font(.system(.largeTitle, design: .rounded))
                     .bold()
                     .monospacedDigit()
                     .foregroundStyle(.primary)
                     .lineLimit(1)
                     .minimumScaleFactor(0.65)
+                    .accessibilityLabel(
+                        hideBalances
+                            ? "Tổng tài sản đang ẩn"
+                            : "Tổng tài sản \(VNDFormatter.format(coordinator.summary.totalBalance))"
+                    )
             }
 
             Spacer(minLength: 8)
@@ -131,7 +213,7 @@ struct OverviewView: View {
 
         return layout {
             ForEach(coordinator.wallets) { wallet in
-                WalletBentoTile(wallet: wallet) {
+                WalletBentoTile(wallet: wallet, hideBalance: hideBalances) {
                     if selectedWalletFilter == wallet.id {
                         selectedWalletFilter = nil
                     } else {
@@ -152,15 +234,16 @@ struct OverviewView: View {
     private var recentActivitySection: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack {
-                Text(selectedWalletFilter == nil ? "Mới nhất" : "Lọc: \(selectedWalletFilter?.displayName ?? "")")
+                Text(activityHeaderTitle)
                     .font(.headline)
                     .foregroundStyle(.primary)
 
                 Spacer()
 
-                if selectedWalletFilter != nil {
-                    Button("Hiện tất cả") {
+                if hasActiveFilter {
+                    Button("Xóa lọc") {
                         selectedWalletFilter = nil
+                        selectedTagFilterName = nil
                         isShowingAllTransactions = false
                     }
                     .font(.footnote.bold())
@@ -169,13 +252,23 @@ struct OverviewView: View {
             }
 
             if visibleTransactions.isEmpty {
-                ContentUnavailableView(
-                    "Chưa có giao dịch",
-                    systemImage: "tray",
-                    description: Text("Thông báo MBBank/MoMo từ Shortcuts hoặc giao dịch nhập tay sẽ hiện tại đây.")
-                )
-                .frame(maxWidth: .infinity)
-                .padding(.vertical, 20)
+                if isSearching {
+                    ContentUnavailableView.search(text: trimmedSearch)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 16)
+                } else {
+                    ContentUnavailableView(
+                        hasActiveFilter ? "Không có giao dịch khớp bộ lọc" : "Chưa có giao dịch",
+                        systemImage: hasActiveFilter ? "line.3.horizontal.decrease.circle" : "tray",
+                        description: Text(
+                            hasActiveFilter
+                                ? "Thử bỏ lọc ví hoặc tag để xem toàn bộ giao dịch trong tháng."
+                                : "Thông báo MBBank/MoMo từ Shortcuts hoặc giao dịch nhập tay sẽ hiện tại đây."
+                        )
+                    )
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 20)
+                }
             } else {
                 VStack(spacing: 10) {
                     ForEach(visibleTransactions.enumerated(), id: \.element.id) { idx, tx in
@@ -196,7 +289,7 @@ struct OverviewView: View {
                         .buttonStyle(.plain)
                         .contextMenu {
                             if tx.txType != .internalTransfer {
-                                Button("Chọn tag & ghi chú", systemImage: "tag") {
+                                Button("Sửa & chọn tag", systemImage: "tag") {
                                     coordinator.activeTaggingTransaction = tx
                                 }
                             }
@@ -207,7 +300,7 @@ struct OverviewView: View {
                     }
                 }
 
-                if allFilteredTransactions.count > 12 {
+                if !isSearching && allFilteredTransactions.count > 12 {
                     Button {
                         isShowingAllTransactions.toggle()
                     } label: {
@@ -223,6 +316,16 @@ struct OverviewView: View {
         }
         .padding(16)
         .background(OutcomeTheme.Colors.card, in: .rect(cornerRadius: OutcomeTheme.Layout.cardRadius))
+    }
+
+    private var privacyToggleButton: some View {
+        Button(
+            hideBalances ? "Hiện số dư" : "Ẩn số dư",
+            systemImage: hideBalances ? "eye.slash" : "eye"
+        ) {
+            hideBalances.toggle()
+        }
+        .labelStyle(.iconOnly)
     }
 
     private var addTransactionButton: some View {

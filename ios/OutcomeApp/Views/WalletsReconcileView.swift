@@ -1,5 +1,6 @@
 import OutcomeCore
 import SwiftUI
+import UniformTypeIdentifiers
 
 struct WalletsReconcileView: View {
     private enum Field: Hashable {
@@ -9,6 +10,8 @@ struct WalletsReconcileView: View {
     }
 
     @Environment(AppCoordinator.self) private var coordinator
+    @AppStorage("outcome.requireBiometricLock") private var requireBiometricLock: Bool = false
+    @AppStorage("outcome.hideBalances") private var hideBalances: Bool = false
     @FocusState private var focusedField: Field?
 
     @State private var mbActualText: String = ""
@@ -16,6 +19,15 @@ struct WalletsReconcileView: View {
     @State private var reconcileNote: String = ""
     @State private var didSeedInputs: Bool = false
     @State private var reconcileTrigger: Int = 0
+
+    // Backup & CSV export/import state
+    @State private var isExportingJSON: Bool = false
+    @State private var isExportingCSV: Bool = false
+    @State private var isImportingJSON: Bool = false
+    @State private var jsonDocument: OutcomeJSONDocument = OutcomeJSONDocument()
+    @State private var csvDocument: OutcomeCSVDocument = OutcomeCSVDocument()
+    @State private var pendingRestoreSnapshot: OutcomeBackupSnapshot?
+    @State private var statusBannerMessage: String?
 
     private var mbExpected: Int {
         coordinator.wallets.first(where: { $0.id == .mbbank })?.balance ?? 0
@@ -42,15 +54,57 @@ struct WalletsReconcileView: View {
         parsedMbActual != nil && parsedMomoActual != nil
     }
 
+    private var exportDateStamp: String {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.dateFormat = "yyyy-MM-dd"
+        return formatter.string(from: Date())
+    }
+
     var body: some View {
         NavigationStack {
             ScrollView {
                 VStack(alignment: .leading, spacing: OutcomeTheme.Layout.sectionSpacing) {
+                    if let banner = statusBannerMessage {
+                        HStack(spacing: 10) {
+                            Image(systemName: "checkmark.circle.fill")
+                                .foregroundStyle(OutcomeTheme.Colors.income)
+                                .accessibilityHidden(true)
+
+                            Text(banner)
+                                .font(.footnote.bold())
+                                .foregroundStyle(.primary)
+
+                            Spacer()
+
+                            Button("Đóng", systemImage: "xmark") {
+                                statusBannerMessage = nil
+                            }
+                            .labelStyle(.iconOnly)
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                            .frame(
+                                minWidth: OutcomeTheme.Layout.minTouchTarget,
+                                minHeight: OutcomeTheme.Layout.minTouchTarget
+                            )
+                        }
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 6)
+                        .background(
+                            OutcomeTheme.Colors.card,
+                            in: .rect(cornerRadius: OutcomeTheme.Layout.chipRadius)
+                        )
+                    }
+
                     reminderCard
 
                     reconcileCards
 
                     noteAndActionCard
+
+                    backupAndExportCard
+
+                    securityCard
 
                     if !coordinator.reconciliations.isEmpty {
                         historyCard
@@ -91,6 +145,36 @@ struct WalletsReconcileView: View {
                 }
             }
             .sensoryFeedback(.success, trigger: reconcileTrigger)
+            .confirmationDialog(
+                "Khôi phục từ bản sao lưu?",
+                isPresented: Binding(
+                    get: { pendingRestoreSnapshot != nil },
+                    set: { isPresented in
+                        if !isPresented { pendingRestoreSnapshot = nil }
+                    }
+                ),
+                titleVisibility: .visible
+            ) {
+                Button("Khôi phục & thay thế dữ liệu hiện tại", role: .destructive) {
+                    if let snapshot = pendingRestoreSnapshot {
+                        coordinator.restoreBackup(snapshot)
+                        mbActualText = String(max(0, mbExpected))
+                        momoActualText = String(max(0, momoExpected))
+                        reconcileTrigger += 1
+                        statusBannerMessage = "Đã khôi phục \(snapshot.transactions.count) giao dịch và \(snapshot.tags.count) tag."
+                    }
+                    pendingRestoreSnapshot = nil
+                }
+                Button("Hủy", role: .cancel) {
+                    pendingRestoreSnapshot = nil
+                }
+            } message: {
+                if let snapshot = pendingRestoreSnapshot {
+                    Text(
+                        "Bản sao lưu gồm \(snapshot.transactions.count) giao dịch và \(snapshot.tags.count) tag. Dữ liệu hiện tại trên máy sẽ được thay thế."
+                    )
+                }
+            }
         }
     }
 
@@ -244,6 +328,7 @@ struct WalletsReconcileView: View {
                     note: reconcileNote
                 )
                 reconcileNote = ""
+                statusBannerMessage = "Đã chốt số dư thực tế thành công."
             } label: {
                 Text("Chốt số dư thực tế")
                     .font(.headline)
@@ -257,6 +342,128 @@ struct WalletsReconcileView: View {
             .buttonStyle(.plain)
             .disabled(!canCommit)
         }
+    }
+
+    private var backupAndExportCard: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Dữ liệu & Sao lưu")
+                .font(.headline)
+
+            Text("Lưu bản sao JSON ra iCloud Drive hoặc Tệp để không bao giờ mất lịch sử khi đổi máy hay cài lại app.")
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+
+            Divider()
+
+            Button {
+                focusedField = nil
+                if let data = coordinator.exportBackupJSON() {
+                    jsonDocument = OutcomeJSONDocument(data: data)
+                    isExportingJSON = true
+                }
+            } label: {
+                actionRowLabel(
+                    title: "Sao lưu toàn bộ (JSON)",
+                    subtitle: "\(coordinator.allTransactions.count) giao dịch · \(coordinator.tags.count) tag",
+                    symbol: "square.and.arrow.up",
+                    tint: OutcomeTheme.Colors.accent
+                )
+            }
+            .buttonStyle(.plain)
+            .fileExporter(
+                isPresented: $isExportingJSON,
+                document: jsonDocument,
+                contentType: .json,
+                defaultFilename: "Outcome-Backup-\(exportDateStamp)"
+            ) { result in
+                switch result {
+                case .success:
+                    reconcileTrigger += 1
+                    statusBannerMessage = "Đã lưu bản sao lưu JSON thành công."
+                case .failure:
+                    coordinator.errorMessage = "Không thể xuất file sao lưu JSON."
+                }
+            }
+
+            Divider()
+
+            Button {
+                focusedField = nil
+                isImportingJSON = true
+            } label: {
+                actionRowLabel(
+                    title: "Khôi phục từ file JSON",
+                    subtitle: "Nhập lại toàn bộ ví, tag và giao dịch",
+                    symbol: "square.and.arrow.down",
+                    tint: .primary
+                )
+            }
+            .buttonStyle(.plain)
+            .fileImporter(
+                isPresented: $isImportingJSON,
+                allowedContentTypes: [.json],
+                allowsMultipleSelection: false
+            ) { result in
+                handleJSONImport(result)
+            }
+
+            Divider()
+
+            Button {
+                focusedField = nil
+                csvDocument = OutcomeCSVDocument(csvText: coordinator.exportCSV())
+                isExportingCSV = true
+            } label: {
+                actionRowLabel(
+                    title: "Xuất bảng tính CSV",
+                    subtitle: "Mở trực tiếp bằng Excel hoặc Numbers",
+                    symbol: "tablecells",
+                    tint: .primary
+                )
+            }
+            .buttonStyle(.plain)
+            .fileExporter(
+                isPresented: $isExportingCSV,
+                document: csvDocument,
+                contentType: .commaSeparatedText,
+                defaultFilename: "Outcome-GiaoDich-\(exportDateStamp)"
+            ) { result in
+                switch result {
+                case .success:
+                    reconcileTrigger += 1
+                    statusBannerMessage = "Đã xuất bảng tính CSV thành công."
+                case .failure:
+                    coordinator.errorMessage = "Không thể xuất file CSV."
+                }
+            }
+        }
+        .padding(16)
+        .background(OutcomeTheme.Colors.card, in: .rect(cornerRadius: OutcomeTheme.Layout.cardRadius))
+    }
+
+    private var securityCard: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Bảo mật & Quyền riêng tư")
+                .font(.headline)
+
+            Toggle(isOn: $requireBiometricLock) {
+                Label("Khóa ứng dụng bằng Face ID", systemImage: "faceid")
+                    .font(.subheadline)
+            }
+            .tint(OutcomeTheme.Colors.accent)
+            .frame(minHeight: OutcomeTheme.Layout.minTouchTarget)
+
+            Divider()
+
+            Toggle(isOn: $hideBalances) {
+                Label("Ẩn số dư trên màn hình chính", systemImage: "eye.slash")
+                    .font(.subheadline)
+            }
+            .tint(OutcomeTheme.Colors.accent)
+            .frame(minHeight: OutcomeTheme.Layout.minTouchTarget)
+        }
+        .padding(16)
+        .background(OutcomeTheme.Colors.card, in: .rect(cornerRadius: OutcomeTheme.Layout.cardRadius))
     }
 
     private var historyCard: some View {
@@ -293,6 +500,62 @@ struct WalletsReconcileView: View {
         }
         .padding(16)
         .background(OutcomeTheme.Colors.card, in: .rect(cornerRadius: OutcomeTheme.Layout.cardRadius))
+    }
+
+    private func actionRowLabel(
+        title: String,
+        subtitle: String,
+        symbol: String,
+        tint: Color
+    ) -> some View {
+        HStack(spacing: 12) {
+            Image(systemName: symbol)
+                .font(.body.weight(.semibold))
+                .foregroundStyle(tint)
+                .frame(width: 28)
+                .accessibilityHidden(true)
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title)
+                    .font(.subheadline.bold())
+                    .foregroundStyle(.primary)
+                Text(subtitle)
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
+
+            Spacer()
+
+            Image(systemName: "chevron.right")
+                .font(.footnote.bold())
+                .foregroundStyle(.tertiary)
+                .accessibilityHidden(true)
+        }
+        .frame(minHeight: OutcomeTheme.Layout.minTouchTarget)
+        .contentShape(.rect)
+    }
+
+    private func handleJSONImport(_ result: Result<[URL], Error>) {
+        switch result {
+        case .success(let urls):
+            guard let url = urls.first else { return }
+            let didStartAccessing = url.startAccessingSecurityScopedResource()
+            defer {
+                if didStartAccessing {
+                    url.stopAccessingSecurityScopedResource()
+                }
+            }
+            do {
+                let data = try Data(contentsOf: url)
+                if let snapshot = coordinator.previewBackupJSON(data) {
+                    pendingRestoreSnapshot = snapshot
+                }
+            } catch {
+                coordinator.errorMessage = "Không thể đọc file sao lưu đã chọn."
+            }
+        case .failure:
+            coordinator.errorMessage = "Không thể mở trình chọn file."
+        }
     }
 }
 

@@ -18,4 +18,11 @@ public protocol ExpenseStore: AnyObject {
 
     func saveReconciliation(_ rec: BalanceReconciliation)
     func listReconciliations() -> [BalanceReconciliation]
+
+    func replaceAll(
+        wallets: [WalletAccount],
+        tags: [Tag],
+        transactions: [Transaction],
+        reconciliations: [BalanceReconciliation]
+    )
 }

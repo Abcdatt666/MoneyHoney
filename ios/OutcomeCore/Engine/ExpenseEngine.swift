@@ -12,6 +12,45 @@ public final class ExpenseEngine {
         case duplicateTagName(String)
     }
 
+    private static let crossAppWindowSeconds: TimeInterval = 120
+    private static let crossAppMergeDelimiter = " || "
+
+    private static let mbbankMoMoGatewayMarkers: [String] = [
+        "MOMO",
+        "M_SERVICE",
+        "MSERVICE",
+        "M SERVICE",
+        "VI MOMO",
+        "NAPAS",
+    ]
+
+    private static let momoLinkedPaymentMarkers: [String] = [
+        "THANH TOAN",
+        "CHO DICH VU",
+        "LIEN KET",
+        "NGAN HANG",
+        "MBBANK",
+        "MB BANK",
+        "APPLE",
+        "GRAB",
+        "GOOGLE",
+        "SPOTIFY",
+        "NETFLIX",
+        "YOUTUBE",
+        "ICLOUD",
+        "APP STORE",
+    ]
+
+    private static let genericBankDescMarkers: [String] = [
+        "MOMO",
+        "M_SERVICE",
+        "MSERVICE",
+        "M SERVICE",
+        "THANH TOAN",
+        "TT ",
+        "KHONG RO NOI DUNG",
+    ]
+
     public let store: ExpenseStore
     public let syncMBBankReportedBalance: Bool
 
@@ -42,7 +81,21 @@ public final class ExpenseEngine {
         let rawText = "\(raw.title) | \(raw.body)"
             .trimmingCharacters(in: CharacterSet.whitespacesAndNewlines.union(CharacterSet(charactersIn: "|")))
 
+        // Reconcile cross-app linked-bank expense (e.g., Apple Services / Grab billed
+        // through MoMo using linked MBBank account) regardless of which app notifies first.
+        if let mergedTx = reconcileCrossAppLinkedExpense(raw: raw, parsed: parsed, rawText: rawText) {
+            return IngestResult(
+                status: .duplicate,
+                transaction: mergedTx,
+                reason: "Merged linked MoMo/MBBank expense into a single MBBank transaction."
+            )
+        }
+
         if parsed.txType == .internalTransfer {
+            // Self-heal if MoMo fired its wallet-side notification a few seconds
+            // before MBBank's authoritative MOMO-CASHIN / MOMO-CASHOUT notification.
+            removePrematureMoMoTransferLeg(raw: raw, parsed: parsed)
+
             let tx = Transaction(
                 txType: .internalTransfer,
                 sourceWalletId: parsed.sourceWalletId,
@@ -131,6 +184,82 @@ public final class ExpenseEngine {
         tx.confirmedAt = now
         store.saveTransaction(tx)
         return tx
+    }
+
+    /// Update any editable field of a non-internal transaction while keeping
+    /// both wallet balances mathematically exact.
+    @discardableResult
+    public func updateTransaction(
+        txId: String,
+        walletId: WalletId,
+        direction: Direction,
+        amount: Int,
+        tagId: String,
+        description: String,
+        note: String,
+        occurredAt: Date,
+        now: Date = Date()
+    ) throws -> Transaction {
+        guard let existing = store.getTransaction(txId) else {
+            throw EngineError.transactionNotFound(txId)
+        }
+        guard existing.txType != .internalTransfer else {
+            throw EngineError.cannotTagInternalTransfer
+        }
+        guard amount > 0 else {
+            throw EngineError.nonPositiveAmount
+        }
+        guard let tag = store.getTag(tagId) else {
+            throw EngineError.tagNotFound(tagId)
+        }
+
+        try BalanceCalculator.reverseTransactionBalances(store: store, tx: existing)
+
+        var updated = existing
+        updated.sourceWalletId = walletId
+        updated.direction = direction
+        updated.txType = direction == .out ? .expense : .income
+        updated.amount = amount
+        let cleanDesc = description.trimmingCharacters(in: .whitespacesAndNewlines)
+        updated.description = cleanDesc.isEmpty ? existing.description : cleanDesc
+        updated.tagId = tag.id
+        updated.note = note.trimmingCharacters(in: .whitespacesAndNewlines)
+        updated.occurredAt = occurredAt
+        updated.status = .confirmed
+        updated.confirmedAt = existing.confirmedAt ?? now
+
+        try BalanceCalculator.applyTransactionBalances(
+            store: store,
+            tx: updated,
+            syncReportedBalance: false
+        )
+        store.saveTransaction(updated)
+        return updated
+    }
+
+    public func suggestTags(for tx: Transaction, limit: Int = 3) -> [Tag] {
+        TagSuggester.suggest(
+            for: tx,
+            history: store.listTransactions(),
+            availableTags: store.listTags(),
+            limit: limit
+        )
+    }
+
+    public func exportBackupJSON(now: Date = Date()) throws -> Data {
+        try OutcomeBackupCodec.encodeJSON(from: store, now: now)
+    }
+
+    public func previewBackupJSON(_ data: Data) throws -> OutcomeBackupSnapshot {
+        try OutcomeBackupCodec.decodeJSON(data)
+    }
+
+    public func restoreBackup(_ snapshot: OutcomeBackupSnapshot) {
+        OutcomeBackupCodec.restore(snapshot, into: store)
+    }
+
+    public func exportCSV() -> String {
+        OutcomeBackupCodec.encodeCSV(from: store)
     }
 
     @discardableResult
@@ -301,7 +430,158 @@ public final class ExpenseEngine {
         )
     }
 
-    // MARK: - Deduplication & Prompting
+    // MARK: - Deduplication, Cross-App Merging & Prompting
+
+    private static func normalizedUpper(_ text: String) -> String {
+        text
+            .replacingOccurrences(of: "đ", with: "d")
+            .replacingOccurrences(of: "Đ", with: "D")
+            .folding(options: .diacriticInsensitive, locale: Locale(identifier: "en_US_POSIX"))
+            .uppercased()
+    }
+
+    private func isWithinCrossAppWindow(
+        existing: Transaction,
+        raw: RawNotification,
+        parsed: ParsedTransaction
+    ) -> Bool {
+        let occurredDelta = abs(parsed.occurredAt.timeIntervalSince(existing.occurredAt))
+        let receivedDelta = abs(raw.receivedAt.timeIntervalSince(existing.createdAt))
+        return min(occurredDelta, receivedDelta) <= Self.crossAppWindowSeconds
+    }
+
+    private func matchesLinkedBankPayment(mbbankText: String, momoText: String) -> Bool {
+        let mbUpper = Self.normalizedUpper(mbbankText)
+        let momoUpper = Self.normalizedUpper(momoText)
+        return Self.mbbankMoMoGatewayMarkers.contains(where: { mbUpper.contains($0) }) ||
+            Self.momoLinkedPaymentMarkers.contains(where: { momoUpper.contains($0) })
+    }
+
+    private func shouldUpgradeBankDescription(
+        current: String,
+        with momoDescription: String
+    ) -> Bool {
+        guard !momoDescription.isEmpty, momoDescription != "Không rõ nội dung" else {
+            return false
+        }
+        if current.isEmpty || current == "Không rõ nội dung" {
+            return true
+        }
+        let currentUpper = Self.normalizedUpper(current)
+        return Self.genericBankDescMarkers.contains(where: { currentUpper.contains($0) })
+    }
+
+    private func reconcileCrossAppLinkedExpense(
+        raw: RawNotification,
+        parsed: ParsedTransaction,
+        rawText: String
+    ) -> Transaction? {
+        guard parsed.txType == .expense, parsed.direction == .out else {
+            return nil
+        }
+
+        for existing in store.listTransactions() {
+            if existing.isManual { continue }
+            guard existing.txType == .expense,
+                  existing.direction == .out,
+                  existing.amount == parsed.amount,
+                  existing.sourceWalletId != parsed.sourceWalletId else {
+                continue
+            }
+            if let existingRaw = existing.rawNotificationText,
+               existingRaw.contains(Self.crossAppMergeDelimiter) {
+                continue
+            }
+            guard isWithinCrossAppWindow(existing: existing, raw: raw, parsed: parsed) else {
+                continue
+            }
+
+            // Order 1: MBBank arrived first, MoMo arrived second -> keep MBBank deduction,
+            // leave Ví MoMo untouched, and enrich description with MoMo's merchant name.
+            if existing.sourceWalletId == .mbbank, parsed.sourceWalletId == .momo {
+                let mbText = "\(existing.description) \(existing.rawNotificationText ?? "")"
+                let momoText = "\(parsed.description) \(rawText)"
+                guard matchesLinkedBankPayment(mbbankText: mbText, momoText: momoText) else {
+                    continue
+                }
+
+                var updated = existing
+                if shouldUpgradeBankDescription(current: updated.description, with: parsed.description) {
+                    updated.description = parsed.description
+                }
+                updated.rawNotificationText = [existing.rawNotificationText, rawText]
+                    .compactMap { $0 }
+                    .filter { !$0.isEmpty }
+                    .joined(separator: Self.crossAppMergeDelimiter)
+                store.saveTransaction(updated)
+                return updated
+            }
+
+            // Order 2: MoMo arrived first, MBBank arrived second -> refund Ví MoMo,
+            // re-home the transaction to MBBank, apply MBBank deduction, keep MoMo's
+            // clean merchant description and any tag/note the user already picked.
+            if existing.sourceWalletId == .momo, parsed.sourceWalletId == .mbbank {
+                let mbText = "\(parsed.description) \(rawText)"
+                let momoText = "\(existing.description) \(existing.rawNotificationText ?? "")"
+                guard matchesLinkedBankPayment(mbbankText: mbText, momoText: momoText) else {
+                    continue
+                }
+
+                try? BalanceCalculator.reverseTransactionBalances(store: store, tx: existing)
+                var updated = existing
+                updated.sourceWalletId = .mbbank
+                if let traceId = parsed.traceId {
+                    updated.traceId = traceId
+                }
+                if let reportedBalance = parsed.reportedBalanceAfter {
+                    updated.reportedBalanceAfter = reportedBalance
+                }
+                updated.occurredAt = parsed.occurredAt
+                if (updated.description.isEmpty || updated.description == "Không rõ nội dung"),
+                   !parsed.description.isEmpty {
+                    updated.description = parsed.description
+                }
+                updated.rawNotificationText = [existing.rawNotificationText, rawText]
+                    .compactMap { $0 }
+                    .filter { !$0.isEmpty }
+                    .joined(separator: Self.crossAppMergeDelimiter)
+
+                try? BalanceCalculator.applyTransactionBalances(
+                    store: store,
+                    tx: updated,
+                    syncReportedBalance: syncMBBankReportedBalance
+                )
+                store.saveTransaction(updated)
+                return updated
+            }
+        }
+
+        return nil
+    }
+
+    private func removePrematureMoMoTransferLeg(
+        raw: RawNotification,
+        parsed: ParsedTransaction
+    ) {
+        guard parsed.txType == .internalTransfer else { return }
+        let isCashIn = parsed.description.contains("MOMO-CASHIN")
+        let isCashOut = parsed.description.contains("MOMO-CASHOUT")
+        guard isCashIn || isCashOut else { return }
+
+        for existing in store.listTransactions() {
+            if existing.isManual || existing.sourceWalletId != .momo { continue }
+            guard existing.amount == parsed.amount,
+                  isWithinCrossAppWindow(existing: existing, raw: raw, parsed: parsed) else {
+                continue
+            }
+            if (isCashIn && existing.txType == .income && existing.direction == .in) ||
+               (isCashOut && existing.txType == .expense && existing.direction == .out) {
+                try? BalanceCalculator.reverseTransactionBalances(store: store, tx: existing)
+                _ = store.deleteTransaction(existing.id)
+                return
+            }
+        }
+    }
 
     private func isDuplicateNotification(raw: RawNotification, parsed: ParsedTransaction) -> Bool {
         let rawText = "\(raw.title) | \(raw.body)"
@@ -325,7 +605,7 @@ public final class ExpenseEngine {
             }
 
             if existing.txType == .internalTransfer,
-               deltaSeconds <= 120,
+               isWithinCrossAppWindow(existing: existing, raw: raw, parsed: parsed),
                existing.amount == parsed.amount,
                raw.sourceApp == .momo {
                 if (existing.description.contains("MOMO-CASHIN") && parsed.direction == .in) ||

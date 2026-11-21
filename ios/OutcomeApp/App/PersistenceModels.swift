@@ -371,4 +371,84 @@ final class SwiftDataExpenseStore: ExpenseStore {
         )
         return ((try? context.fetch(descriptor)) ?? []).map { $0.toDomain() }
     }
+
+    func replaceAll(
+        wallets: [WalletAccount],
+        tags: [Tag],
+        transactions: [Transaction],
+        reconciliations: [BalanceReconciliation]
+    ) {
+        if let oldTxs = try? context.fetch(FetchDescriptor<TransactionRecord>()) {
+            for item in oldTxs { context.delete(item) }
+        }
+        if let oldRecs = try? context.fetch(FetchDescriptor<ReconciliationRecord>()) {
+            for item in oldRecs { context.delete(item) }
+        }
+        if let oldTags = try? context.fetch(FetchDescriptor<TagRecord>()) {
+            for item in oldTags { context.delete(item) }
+        }
+        if let oldWallets = try? context.fetch(FetchDescriptor<WalletRecord>()) {
+            for item in oldWallets { context.delete(item) }
+        }
+        try? context.save()
+
+        var walletById: [WalletId: WalletAccount] = [
+            .mbbank: WalletAccount(id: .mbbank, name: WalletId.mbbank.displayName, balance: 0),
+            .momo: WalletAccount(id: .momo, name: WalletId.momo.displayName, balance: 0),
+        ]
+        for wallet in wallets {
+            walletById[wallet.id] = wallet
+        }
+        for wallet in [walletById[.mbbank]!, walletById[.momo]!] {
+            context.insert(
+                WalletRecord(
+                    idRaw: wallet.id.rawValue,
+                    name: wallet.name,
+                    balance: wallet.balance,
+                    lastReconciledBalance: wallet.lastReconciledBalance,
+                    lastReconciledAt: wallet.lastReconciledAt
+                )
+            )
+        }
+
+        if tags.isEmpty {
+            let now = Date()
+            for (idx, spec) in DefaultTagSpecs.all.enumerated() {
+                context.insert(
+                    TagRecord(
+                        id: spec.id,
+                        name: spec.name,
+                        isDefault: true,
+                        sortOrder: idx,
+                        createdAt: now
+                    )
+                )
+            }
+        } else {
+            var seenTagIds: Set<String> = []
+            for tag in tags where seenTagIds.insert(tag.id).inserted {
+                context.insert(
+                    TagRecord(
+                        id: tag.id,
+                        name: tag.name,
+                        isDefault: tag.isDefault,
+                        sortOrder: tag.sortOrder,
+                        createdAt: tag.createdAt
+                    )
+                )
+            }
+        }
+
+        var seenTxIds: Set<String> = []
+        for tx in transactions where seenTxIds.insert(tx.id).inserted {
+            context.insert(TransactionRecord(from: tx))
+        }
+
+        var seenRecIds: Set<String> = []
+        for rec in reconciliations where seenRecIds.insert(rec.id).inserted {
+            context.insert(ReconciliationRecord(from: rec))
+        }
+
+        try? context.save()
+    }
 }

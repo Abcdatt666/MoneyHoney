@@ -40,7 +40,7 @@ _SIGNED_AMOUNT_RE = re.compile(
 )
 
 _CURRENCY_AMOUNT_RE = re.compile(
-    r"\b(?P<num>\d{1,3}(?:[.,]\d{3})+|\d+)\s*(?:VND|VNĐ|đ)\b",
+    r"(?<!\d)(?P<num>\d{1,3}(?:[.,]\d{3})+|\d+)\s*(?:VND|VNĐ|đ|Đ)(?=\s|[.,;:!?\)\"]|$)",
     re.IGNORECASE,
 )
 
@@ -61,11 +61,40 @@ _MOMO_RECEIVE_RE = re.compile(
     re.IGNORECASE,
 )
 
+_MOMO_RECEIVED_FROM_RE = re.compile(
+    r"nhận\s+được\s+.*?\s+từ\s+(?P<sender>.+?)(?:\s*\([0-9\s.+\-]+\)|\s+qua\s+[^.\n]+|\s*[.\n]|$)",
+    re.IGNORECASE,
+)
+
+_MOMO_PAYMENT_RE = re.compile(
+    r"thanh\s+toán(?:\s+thành\s+công)?\s+.*?\s+(?:cho\s+dịch\s+vụ|cho|tại)\s+(?P<merchant>[^.\n]+)",
+    re.IGNORECASE,
+)
+
+_MOMO_REFUND_RE = re.compile(
+    r"(?:được\s+hoàn|hoàn\s+tiền).*?\s+từ\s+(?:giao\s+dịch\s+)?(?P<merchant>.+?)(?:\s+vào\s+Ví\s+MoMo|\s*[.\n]|$)",
+    re.IGNORECASE,
+)
+
+_MOMO_TRANSFER_OUT_RE = re.compile(
+    r"(?:đã\s+chuyển|chuyển\s+tiền(?:\s+thành\s+công)?)\s+.*?\s+(?:cho|đến|tới)\s+(?P<recipient>[^.\n(]+)",
+    re.IGNORECASE,
+)
+
+_MOMO_MSG_RE = re.compile(r"L[ơờ]i\s+nh[ắa]n\s*:\s*(?P<msg>.+)$", re.IGNORECASE)
+
 _PROMO_KEYWORDS: tuple[str, ...] = (
     "UU DAI",
     "KHUYEN MAI",
     "GIAM GIA",
     "VOUCHER",
+    "THE QUA",
+    "QUA TANG",
+    "NHAN NGAY",
+    "CO HOI",
+    "GIOI THIEU BAN BE",
+    "TRUNG THUONG",
+    "TANG BAN",
     "HOAN TIEN LEN DEN",
     "BAO TRI",
     "CAP NHAT UNG DUNG",
@@ -81,6 +110,12 @@ _IN_PHRASES: tuple[str, ...] = (
     "CHUYEN DEN BAN",
     "CONG TIEN",
     "HOAN TIEN",
+    "DUOC HOAN",
+    "HOAN LAI",
+    "TIEN LOI",
+    "NAP TIEN VAO VI",
+    "VAO VI MOMO",
+    "NAP VAO VI",
 )
 
 _OUT_PHRASES: tuple[str, ...] = (
@@ -90,6 +125,14 @@ _OUT_PHRASES: tuple[str, ...] = (
     "DA CHUYEN",
     "TRU TIEN",
     "RUT TIEN",
+    "DA RUT",
+    "MUA THE",
+    "NAP DIEN THOAI",
+    "NAP TIEN DIEN THOAI",
+    "NAP DATA",
+    "NAP 4G",
+    "CHUYEN DEN",
+    "GUI DEN",
 )
 
 
@@ -166,6 +209,14 @@ def _extract_trace_id(text: str) -> Optional[str]:
     return match.group("trace").strip() if match else None
 
 
+def _extract_momo_message(raw_body: str) -> Optional[str]:
+    msg_match = _MOMO_MSG_RE.search(raw_body)
+    if not msg_match:
+        return None
+    cleaned = msg_match.group("msg").strip().strip('"\'“” ')
+    return cleaned if cleaned else None
+
+
 def _extract_description(raw_title: str, raw_body: str) -> str:
     combined = f"{raw_title}\n{raw_body}".strip()
     upper_ascii = _strip_vietnamese_accents(combined).upper()
@@ -181,13 +232,41 @@ def _extract_description(raw_title: str, raw_body: str) -> str:
         if desc:
             return desc
 
+    if "TUI THAN TAI" in upper_ascii:
+        return "Tiền lời Túi Thần Tài"
+
+    refund_match = _MOMO_REFUND_RE.search(raw_body)
+    if refund_match:
+        merchant = refund_match.group("merchant").strip(" .:-")
+        if merchant:
+            return f"Hoàn tiền - {merchant}"
+
     momo_match = _MOMO_RECEIVE_RE.search(raw_body.strip())
     if momo_match:
         sender = momo_match.group("sender").strip(" .:-")
-        msg_match = re.search(r"L[ơờ]i\s+nh[ắa]n\s*:\s*(?P<msg>.+)$", raw_body, re.IGNORECASE)
-        if msg_match:
-            return f"{sender} - {msg_match.group('msg').strip()}"
-        return sender
+        msg = _extract_momo_message(raw_body)
+        return f"{sender} - {msg}" if msg else sender
+
+    received_from = _MOMO_RECEIVED_FROM_RE.search(raw_body)
+    if received_from:
+        sender = received_from.group("sender").strip(" .:-")
+        msg = _extract_momo_message(raw_body)
+        if msg:
+            return f"{sender} - {msg}"
+        if sender:
+            return sender
+
+    payment_match = _MOMO_PAYMENT_RE.search(raw_body)
+    if payment_match:
+        merchant = payment_match.group("merchant").strip(" .:-")
+        if merchant:
+            return merchant
+
+    transfer_out = _MOMO_TRANSFER_OUT_RE.search(raw_body)
+    if transfer_out:
+        recipient = transfer_out.group("recipient").strip(" .:-")
+        if recipient:
+            return f"Chuyển {recipient}"
 
     cleaned = _BALANCE_RE.sub(" ", raw_body)
     cleaned = _TRACE_RE.sub(" ", cleaned)
@@ -207,13 +286,17 @@ def parse_notification(raw: RawNotification) -> Optional[ParsedTransaction]:
     if not combined:
         return None
 
-    upper_ascii = _strip_vietnamese_accents(combined).upper()
+    # Strip user-typed MoMo transfer message ("Lời nhắn: ...") before promo and
+    # direction checks so words like "voucher" or "hoàn tiền" inside a note never
+    # drop a real transfer or flip its direction.
+    combined_for_matching = _MOMO_MSG_RE.sub("", combined).strip()
+    upper_ascii = _strip_vietnamese_accents(combined_for_matching).upper()
     if any(promo in upper_ascii for promo in _PROMO_KEYWORDS) and not _SIGNED_AMOUNT_RE.search(
-        _BALANCE_RE.sub(" ", combined)
+        _BALANCE_RE.sub(" ", combined_for_matching)
     ):
         return None
 
-    extracted = _extract_amount_direction_and_time(combined, raw.received_at)
+    extracted = _extract_amount_direction_and_time(combined_for_matching, raw.received_at)
     if extracted is None:
         return None
 

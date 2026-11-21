@@ -14,6 +14,8 @@ final class AppCoordinator {
     private let engine: ExpenseEngine
 
     var selectedTab: OutcomeTab = .overview
+    var selectedYear: Int
+    var selectedMonth: Int
     var summary: DashboardSummary
     var wallets: [WalletAccount] = []
     var tags: [Tag] = []
@@ -25,12 +27,17 @@ final class AppCoordinator {
     var isPresentingManualEntry: Bool = false
     var errorMessage: String?
 
-    init(store: ExpenseStore? = nil) {
+    init(store: ExpenseStore? = nil, now: Date = Date()) {
         let resolvedStore = store ?? SwiftDataExpenseStore()
         let engine = ExpenseEngine(store: resolvedStore)
         self.engine = engine
-        self.summary = engine.getDashboardSummary()
-        refresh()
+        let calendar = Calendar.current
+        let year = calendar.component(.year, from: now)
+        let month = calendar.component(.month, from: now)
+        self.selectedYear = year
+        self.selectedMonth = month
+        self.summary = engine.getDashboardSummary(year: year, month: month, now: now)
+        refresh(now: now)
     }
 
     static func preview() -> AppCoordinator {
@@ -64,11 +71,56 @@ final class AppCoordinator {
             description: "Cơm trưa văn phòng",
             occurredAt: now.addingTimeInterval(-3600)
         )
-        return AppCoordinator(store: store)
+        return AppCoordinator(store: store, now: now)
     }
 
+    // MARK: - Month Navigation
+
+    var selectedMonthLabel: String {
+        "Tháng \(selectedMonth), \(selectedYear)"
+    }
+
+    var canGoToNextMonth: Bool {
+        let cal = Calendar.current
+        let now = Date()
+        let currentYear = cal.component(.year, from: now)
+        let currentMonth = cal.component(.month, from: now)
+        return selectedYear < currentYear || (selectedYear == currentYear && selectedMonth < currentMonth)
+    }
+
+    var monthTransactions: [Transaction] {
+        let cal = Calendar.current
+        return allTransactions.filter { tx in
+            cal.component(.year, from: tx.occurredAt) == selectedYear &&
+                cal.component(.month, from: tx.occurredAt) == selectedMonth
+        }
+    }
+
+    func goToPreviousMonth() {
+        if selectedMonth == 1 {
+            selectedMonth = 12
+            selectedYear -= 1
+        } else {
+            selectedMonth -= 1
+        }
+        refresh()
+    }
+
+    func goToNextMonth() {
+        guard canGoToNextMonth else { return }
+        if selectedMonth == 12 {
+            selectedMonth = 1
+            selectedYear += 1
+        } else {
+            selectedMonth += 1
+        }
+        refresh()
+    }
+
+    // MARK: - Data Operations
+
     func refresh(now: Date = Date()) {
-        summary = engine.getDashboardSummary(now: now)
+        summary = engine.getDashboardSummary(year: selectedYear, month: selectedMonth, now: now)
         wallets = engine.listWallets()
         tags = engine.listTags()
         pendingTransactions = engine.listPendingTransactions()
@@ -76,13 +128,47 @@ final class AppCoordinator {
         reconciliations = engine.listReconciliations()
     }
 
+    func suggestTags(for tx: Transaction, limit: Int = 3) -> [Tag] {
+        engine.suggestTags(for: tx, limit: limit)
+    }
+
     func confirmTransaction(txId: String, tagId: String, note: String) {
         do {
             try engine.confirmTransaction(txId: txId, tagId: tagId, note: note)
+            ReminderScheduler.removeDeliveredTransactionPrompt(txId: txId)
             activeTaggingTransaction = nil
             refresh()
         } catch {
             errorMessage = "Không thể lưu phân loại giao dịch."
+        }
+    }
+
+    func updateTransaction(
+        txId: String,
+        walletId: WalletId,
+        direction: Direction,
+        amount: Int,
+        tagId: String,
+        description: String,
+        note: String,
+        occurredAt: Date
+    ) {
+        do {
+            try engine.updateTransaction(
+                txId: txId,
+                walletId: walletId,
+                direction: direction,
+                amount: amount,
+                tagId: tagId,
+                description: description,
+                note: note,
+                occurredAt: occurredAt
+            )
+            ReminderScheduler.removeDeliveredTransactionPrompt(txId: txId)
+            activeTaggingTransaction = nil
+            refresh()
+        } catch {
+            errorMessage = "Không thể cập nhật giao dịch. Vui lòng kiểm tra số tiền và tag."
         }
     }
 
@@ -123,6 +209,7 @@ final class AppCoordinator {
 
     func deleteTransaction(txId: String) {
         if engine.deleteTransaction(txId: txId) {
+            ReminderScheduler.removeDeliveredTransactionPrompt(txId: txId)
             refresh()
         }
     }
@@ -154,5 +241,34 @@ final class AppCoordinator {
     func tagName(for tagId: String?) -> String? {
         guard let tagId else { return nil }
         return tags.first(where: { $0.id == tagId })?.name
+    }
+
+    // MARK: - Backup & CSV Export
+
+    func exportBackupJSON() -> Data? {
+        do {
+            return try engine.exportBackupJSON()
+        } catch {
+            errorMessage = "Không thể tạo file sao lưu JSON."
+            return nil
+        }
+    }
+
+    func previewBackupJSON(_ data: Data) -> OutcomeBackupSnapshot? {
+        do {
+            return try engine.previewBackupJSON(data)
+        } catch {
+            errorMessage = "File sao lưu không hợp lệ hoặc phiên bản không tương thích."
+            return nil
+        }
+    }
+
+    func restoreBackup(_ snapshot: OutcomeBackupSnapshot) {
+        engine.restoreBackup(snapshot)
+        refresh()
+    }
+
+    func exportCSV() -> String {
+        engine.exportCSV()
     }
 }

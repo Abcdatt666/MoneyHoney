@@ -80,4 +80,45 @@ public final class InMemoryExpenseStore: ExpenseStore {
     public func listReconciliations() -> [BalanceReconciliation] {
         reconciliations.sorted { $0.reconciledAt > $1.reconciledAt }
     }
+
+    public func replaceAll(
+        wallets newWallets: [WalletAccount],
+        tags newTags: [Tag],
+        transactions newTransactions: [Transaction],
+        reconciliations newReconciliations: [BalanceReconciliation]
+    ) {
+        var walletMap: [WalletId: WalletAccount] = [
+            .mbbank: WalletAccount(id: .mbbank, name: WalletId.mbbank.displayName, balance: 0),
+            .momo: WalletAccount(id: .momo, name: WalletId.momo.displayName, balance: 0),
+        ]
+        for wallet in newWallets {
+            walletMap[wallet.id] = wallet
+        }
+        wallets = walletMap
+
+        var tagMap: [String: Tag] = [:]
+        for tag in newTags {
+            tagMap[tag.id] = tag
+        }
+        if tagMap.isEmpty {
+            let now = Date()
+            for (idx, spec) in DefaultTagSpecs.all.enumerated() {
+                tagMap[spec.id] = Tag(
+                    id: spec.id,
+                    name: spec.name,
+                    isDefault: true,
+                    sortOrder: idx,
+                    createdAt: now
+                )
+            }
+        }
+        tags = tagMap
+
+        var txMap: [String: Transaction] = [:]
+        for tx in newTransactions {
+            txMap[tx.id] = tx
+        }
+        transactions = txMap
+        reconciliations = newReconciliations
+    }
 }

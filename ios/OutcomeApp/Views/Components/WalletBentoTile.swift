@@ -3,10 +3,15 @@ import SwiftUI
 
 struct WalletBentoTile: View {
     let wallet: WalletAccount
+    var hideBalance: Bool = false
     let action: () -> Void
 
     private var tileBackground: Color {
         wallet.id == .mbbank ? OutcomeTheme.Colors.mbbankTile : OutcomeTheme.Colors.momoTile
+    }
+
+    private var displayBalance: String {
+        hideBalance ? "••••••••" : VNDFormatter.format(wallet.balance)
     }
 
     var body: some View {
@@ -25,7 +30,7 @@ struct WalletBentoTile: View {
                         .accessibilityHidden(true)
                 }
 
-                Text(VNDFormatter.format(wallet.balance))
+                Text(displayBalance)
                     .font(.headline.bold())
                     .monospacedDigit()
                     .foregroundStyle(.primary)
@@ -38,6 +43,10 @@ struct WalletBentoTile: View {
         }
         .buttonStyle(.plain)
         .accessibilityElement(children: .combine)
-        .accessibilityLabel("\(wallet.name), số dư \(VNDFormatter.format(wallet.balance))")
+        .accessibilityLabel(
+            hideBalance
+                ? "\(wallet.name), số dư đang ẩn"
+                : "\(wallet.name), số dư \(VNDFormatter.format(wallet.balance))"
+        )
     }
 }

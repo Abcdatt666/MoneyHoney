@@ -2,14 +2,28 @@ import OutcomeCore
 import SwiftUI
 
 struct TagAssignmentSheet: View {
+    private enum Field: Hashable {
+        case note
+        case amount
+        case description
+    }
+
     @Environment(AppCoordinator.self) private var coordinator
     @Environment(\.dismiss) private var dismiss
-    @FocusState private var isNoteFocused: Bool
+    @FocusState private var focusedField: Field?
 
     let item: OutcomeCore.Transaction
 
     @State private var selectedTagId: String?
     @State private var note: String
+    @State private var walletId: WalletId
+    @State private var direction: Direction
+    @State private var amountText: String
+    @State private var descriptionText: String
+    @State private var occurredAt: Date
+    @State private var isEditingDetails: Bool = false
+    @State private var didSeedSuggestion: Bool = false
+
     @State private var isShowingNewTagAlert: Bool = false
     @State private var isConfirmingDelete: Bool = false
     @State private var newTagName: String = ""
@@ -19,6 +33,33 @@ struct TagAssignmentSheet: View {
         self.item = item
         _selectedTagId = State(initialValue: item.tagId)
         _note = State(initialValue: item.note)
+        _walletId = State(initialValue: item.sourceWalletId)
+        _direction = State(initialValue: item.direction)
+        _amountText = State(initialValue: String(item.amount))
+        _descriptionText = State(initialValue: item.description)
+        _occurredAt = State(initialValue: item.occurredAt)
+    }
+
+    private var parsedAmount: Int? {
+        let digits = amountText.filter(\.isNumber)
+        guard !digits.isEmpty, let value = Int(digits), value > 0 else { return nil }
+        return value
+    }
+
+    private var suggestedTags: [Tag] {
+        coordinator.suggestTags(for: item, limit: 3)
+    }
+
+    private var hasDetailChanges: Bool {
+        walletId != item.sourceWalletId ||
+            direction != item.direction ||
+            parsedAmount != item.amount ||
+            descriptionText.trimmingCharacters(in: .whitespacesAndNewlines) != item.description ||
+            abs(occurredAt.timeIntervalSince(item.occurredAt)) >= 1
+    }
+
+    private var canSave: Bool {
+        selectedTagId != nil && parsedAmount != nil
     }
 
     var body: some View {
@@ -27,8 +68,12 @@ struct TagAssignmentSheet: View {
                 VStack(alignment: .leading, spacing: 16) {
                     summaryCard
 
+                    if !suggestedTags.isEmpty {
+                        suggestedTagsSection
+                    }
+
                     VStack(alignment: .leading, spacing: 10) {
-                        Text("Chọn Tag")
+                        Text("Tất cả Tag")
                             .font(.footnote.bold())
                             .foregroundStyle(.secondary)
 
@@ -36,10 +81,10 @@ struct TagAssignmentSheet: View {
                             tags: coordinator.tags,
                             selectedTagId: $selectedTagId,
                             onSelectTag: {
-                                isNoteFocused = false
+                                focusedField = nil
                             },
                             onTapCreateTag: {
-                                isNoteFocused = false
+                                focusedField = nil
                                 newTagName = ""
                                 isShowingNewTagAlert = true
                             }
@@ -52,9 +97,9 @@ struct TagAssignmentSheet: View {
                             .foregroundStyle(.secondary)
 
                         TextField("Ví dụ: Mua đồ Shopee", text: $note)
-                            .focused($isNoteFocused)
+                            .focused($focusedField, equals: .note)
                             .submitLabel(.done)
-                            .onSubmit { isNoteFocused = false }
+                            .onSubmit { focusedField = nil }
                             .padding(14)
                             .frame(minHeight: OutcomeTheme.Layout.minTouchTarget)
                             .background(
@@ -63,8 +108,10 @@ struct TagAssignmentSheet: View {
                             )
                     }
 
+                    editDetailsSection
+
                     Button(role: .destructive) {
-                        isNoteFocused = false
+                        focusedField = nil
                         isConfirmingDelete = true
                     } label: {
                         Label("Xóa giao dịch này", systemImage: "trash")
@@ -94,38 +141,35 @@ struct TagAssignmentSheet: View {
             }
             .scrollDismissesKeyboard(.interactively)
             .safeAreaInset(edge: .bottom) {
-                if isNoteFocused {
+                if focusedField != nil {
                     KeyboardDoneBar {
-                        isNoteFocused = false
+                        focusedField = nil
                     }
                 }
             }
             .background(OutcomeTheme.Colors.canvas)
-            .navigationTitle("Chọn danh mục")
+            .navigationTitle(item.status == .pending ? "Chọn danh mục" : "Chi tiết giao dịch")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Hủy") {
-                        isNoteFocused = false
+                        focusedField = nil
                         dismiss()
                     }
                 }
 
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Lưu") {
-                        if let tagId = selectedTagId {
-                            isNoteFocused = false
-                            saveTrigger += 1
-                            coordinator.confirmTransaction(
-                                txId: item.id,
-                                tagId: tagId,
-                                note: note
-                            )
-                            dismiss()
-                        }
+                        saveTransaction()
                     }
-                    .disabled(selectedTagId == nil)
+                    .disabled(!canSave)
                 }
+            }
+            .onAppear {
+                if !didSeedSuggestion, selectedTagId == nil, let topTag = suggestedTags.first {
+                    selectedTagId = topTag.id
+                }
+                didSeedSuggestion = true
             }
             .sensoryFeedback(.success, trigger: saveTrigger)
             .alert("Tạo tag mới", isPresented: $isShowingNewTagAlert) {
@@ -139,24 +183,26 @@ struct TagAssignmentSheet: View {
             }
         }
         .presentationBackground(OutcomeTheme.Colors.canvas)
-        .presentationDetents([.fraction(0.78), .large])
+        .presentationDetents([.fraction(0.82), .large])
         .presentationDragIndicator(.visible)
     }
 
     private var summaryCard: some View {
-        VStack(spacing: 4) {
-            Text("\(item.sourceWalletId.displayName) · \(item.description)")
+        let displayAmount = parsedAmount ?? item.amount
+        let displayDesc = descriptionText.trimmingCharacters(in: .whitespacesAndNewlines)
+        return VStack(spacing: 4) {
+            Text("\(walletId.displayName) · \(displayDesc.isEmpty ? item.description : displayDesc)")
                 .font(.footnote)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
 
-            Text(VNDFormatter.formatSigned(item.amount, direction: item.direction))
+            Text(VNDFormatter.formatSigned(displayAmount, direction: direction))
                 .font(.system(.title, design: .rounded))
                 .bold()
                 .monospacedDigit()
-                .foregroundStyle(item.direction == .in ? OutcomeTheme.Colors.income : .primary)
+                .foregroundStyle(direction == .in ? OutcomeTheme.Colors.income : .primary)
 
-            Text(item.occurredAt, format: .dateTime.day().month().year().hour().minute())
+            Text(occurredAt, format: .dateTime.day().month().year().hour().minute())
                 .font(.footnote)
                 .monospacedDigit()
                 .foregroundStyle(.tertiary)
@@ -164,5 +210,163 @@ struct TagAssignmentSheet: View {
         .padding(16)
         .frame(maxWidth: .infinity)
         .background(OutcomeTheme.Colors.card, in: .rect(cornerRadius: OutcomeTheme.Layout.tileRadius))
+    }
+
+    private var suggestedTagsSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Label("Gợi ý cho giao dịch này", systemImage: "sparkles")
+                .font(.footnote.bold())
+                .foregroundStyle(OutcomeTheme.Colors.accent)
+
+            FlowLayout(horizontalSpacing: 8, verticalSpacing: 8) {
+                ForEach(suggestedTags) { tag in
+                    let isSelected = selectedTagId == tag.id
+                    Button {
+                        focusedField = nil
+                        selectedTagId = tag.id
+                    } label: {
+                        Label(tag.name, systemImage: OutcomeTheme.symbol(forTagId: tag.id))
+                            .font(.footnote.weight(.semibold))
+                            .foregroundStyle(isSelected ? Color.white : Color.primary)
+                            .padding(.horizontal, 12)
+                            .frame(minHeight: OutcomeTheme.Layout.minTouchTarget)
+                            .background(
+                                isSelected ? OutcomeTheme.Colors.accent : OutcomeTheme.Colors.card,
+                                in: .capsule
+                            )
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityAddTraits(isSelected ? .isSelected : [])
+                }
+            }
+        }
+    }
+
+    private var editDetailsSection: some View {
+        DisclosureGroup(isExpanded: $isEditingDetails) {
+            VStack(alignment: .leading, spacing: 14) {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Số tiền (VND)")
+                        .font(.footnote.bold())
+                        .foregroundStyle(.secondary)
+
+                    HStack(spacing: 8) {
+                        TextField("Nhập số tiền", text: $amountText)
+                            .keyboardType(.numberPad)
+                            .focused($focusedField, equals: .amount)
+                            .font(.title3.bold())
+                            .monospacedDigit()
+                            .onChange(of: amountText) { _, newValue in
+                                let digits = String(newValue.filter(\.isNumber).prefix(12))
+                                if digits != newValue {
+                                    amountText = digits
+                                }
+                            }
+
+                        if !amountText.isEmpty {
+                            Button("Xóa số tiền", systemImage: "xmark.circle.fill") {
+                                amountText = ""
+                            }
+                            .labelStyle(.iconOnly)
+                            .foregroundStyle(.secondary)
+                            .frame(
+                                minWidth: OutcomeTheme.Layout.minTouchTarget,
+                                minHeight: OutcomeTheme.Layout.minTouchTarget
+                            )
+                        }
+                    }
+                    .padding(.horizontal, 12)
+                    .frame(minHeight: 48)
+                    .background(OutcomeTheme.Colors.track, in: .rect(cornerRadius: 12))
+
+                    if let amount = parsedAmount {
+                        Text(VNDFormatter.format(amount))
+                            .font(.footnote.bold())
+                            .monospacedDigit()
+                            .foregroundStyle(OutcomeTheme.Colors.accent)
+                    }
+                }
+
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Ví nguồn")
+                        .font(.footnote.bold())
+                        .foregroundStyle(.secondary)
+
+                    Picker("Ví nguồn", selection: $walletId) {
+                        Text("MBBank").tag(WalletId.mbbank)
+                        Text("Ví MoMo").tag(WalletId.momo)
+                    }
+                    .pickerStyle(.segmented)
+                }
+
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Loại giao dịch")
+                        .font(.footnote.bold())
+                        .foregroundStyle(.secondary)
+
+                    Picker("Loại giao dịch", selection: $direction) {
+                        Text("Chi tiền").tag(Direction.out)
+                        Text("Nhận tiền").tag(Direction.in)
+                    }
+                    .pickerStyle(.segmented)
+                }
+
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Nội dung")
+                        .font(.footnote.bold())
+                        .foregroundStyle(.secondary)
+
+                    TextField("Nội dung giao dịch", text: $descriptionText)
+                        .focused($focusedField, equals: .description)
+                        .submitLabel(.done)
+                        .onSubmit { focusedField = nil }
+                        .padding(12)
+                        .frame(minHeight: OutcomeTheme.Layout.minTouchTarget)
+                        .background(OutcomeTheme.Colors.track, in: .rect(cornerRadius: 12))
+                }
+
+                DatePicker(
+                    "Thời gian",
+                    selection: $occurredAt,
+                    displayedComponents: [.date, .hourAndMinute]
+                )
+                .font(.subheadline)
+            }
+            .padding(.top, 12)
+        } label: {
+            Label("Sửa chi tiết giao dịch", systemImage: "slider.horizontal.3")
+                .font(.subheadline.bold())
+                .foregroundStyle(.primary)
+                .frame(minHeight: OutcomeTheme.Layout.minTouchTarget)
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 8)
+        .background(OutcomeTheme.Colors.card, in: .rect(cornerRadius: OutcomeTheme.Layout.tileRadius))
+    }
+
+    private func saveTransaction() {
+        guard let tagId = selectedTagId, let amount = parsedAmount else { return }
+        focusedField = nil
+        saveTrigger += 1
+
+        if hasDetailChanges {
+            coordinator.updateTransaction(
+                txId: item.id,
+                walletId: walletId,
+                direction: direction,
+                amount: amount,
+                tagId: tagId,
+                description: descriptionText,
+                note: note,
+                occurredAt: occurredAt
+            )
+        } else {
+            coordinator.confirmTransaction(
+                txId: item.id,
+                tagId: tagId,
+                note: note
+            )
+        }
+        dismiss()
     }
 }

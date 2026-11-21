@@ -13,7 +13,7 @@ public enum NotificationParser {
     )
 
     private static let currencyAmountRegex = try! NSRegularExpression(
-        pattern: #"\b(?<num>\d{1,3}(?:[.,]\d{3})+|\d+)\s*(?:VND|VNĐ|đ)\b"#,
+        pattern: #"(?<!\d)(?<num>\d{1,3}(?:[.,]\d{3})+|\d+)\s*(?:VND|VNĐ|đ|Đ)(?=\s|[.,;:!?\)\"]|$)"#,
         options: [.caseInsensitive]
     )
 
@@ -37,6 +37,26 @@ public enum NotificationParser {
         options: [.caseInsensitive]
     )
 
+    private static let momoReceivedFromRegex = try! NSRegularExpression(
+        pattern: #"nhận\s+được\s+.*?\s+từ\s+(?<sender>.+?)(?:\s*\([0-9\s.+\-]+\)|\s+qua\s+[^.\n]+|\s*[.\n]|$)"#,
+        options: [.caseInsensitive]
+    )
+
+    private static let momoPaymentRegex = try! NSRegularExpression(
+        pattern: #"thanh\s+toán(?:\s+thành\s+công)?\s+.*?\s+(?:cho\s+dịch\s+vụ|cho|tại)\s+(?<merchant>[^.\n]+)"#,
+        options: [.caseInsensitive]
+    )
+
+    private static let momoRefundRegex = try! NSRegularExpression(
+        pattern: #"(?:được\s+hoàn|hoàn\s+tiền).*?\s+từ\s+(?:giao\s+dịch\s+)?(?<merchant>.+?)(?:\s+vào\s+Ví\s+MoMo|\s*[.\n]|$)"#,
+        options: [.caseInsensitive]
+    )
+
+    private static let momoTransferOutRegex = try! NSRegularExpression(
+        pattern: #"(?:đã\s+chuyển|chuyển\s+tiền(?:\s+thành\s+công)?)\s+.*?\s+(?:cho|đến|tới)\s+(?<recipient>[^.\n(]+)"#,
+        options: [.caseInsensitive]
+    )
+
     private static let momoMessageRegex = try! NSRegularExpression(
         pattern: #"L[ơờ]i\s+nh[ắa]n\s*:\s*(?<msg>.+)$"#,
         options: [.caseInsensitive]
@@ -47,6 +67,13 @@ public enum NotificationParser {
         "KHUYEN MAI",
         "GIAM GIA",
         "VOUCHER",
+        "THE QUA",
+        "QUA TANG",
+        "NHAN NGAY",
+        "CO HOI",
+        "GIOI THIEU BAN BE",
+        "TRUNG THUONG",
+        "TANG BAN",
         "HOAN TIEN LEN DEN",
         "BAO TRI",
         "CAP NHAT UNG DUNG",
@@ -62,6 +89,12 @@ public enum NotificationParser {
         "CHUYEN DEN BAN",
         "CONG TIEN",
         "HOAN TIEN",
+        "DUOC HOAN",
+        "HOAN LAI",
+        "TIEN LOI",
+        "NAP TIEN VAO VI",
+        "VAO VI MOMO",
+        "NAP VAO VI",
     ]
 
     private static let outPhrases: [String] = [
@@ -71,21 +104,34 @@ public enum NotificationParser {
         "DA CHUYEN",
         "TRU TIEN",
         "RUT TIEN",
+        "DA RUT",
+        "MUA THE",
+        "NAP DIEN THOAI",
+        "NAP TIEN DIEN THOAI",
+        "NAP DATA",
+        "NAP 4G",
+        "CHUYEN DEN",
+        "GUI DEN",
     ]
 
     public static func parse(_ raw: RawNotification) -> ParsedTransaction? {
         let combined = "\(raw.title) \(raw.body)".trimmingCharacters(in: .whitespacesAndNewlines)
         guard !combined.isEmpty else { return nil }
 
-        let upperAscii = stripVietnameseAccents(combined).uppercased()
-        let combinedWithoutBalance = replacingMatches(of: balanceRegex, in: combined, with: " ")
+        // Strip user-typed MoMo transfer message ("Lời nhắn: ...") before promo and
+        // direction checks so words like "voucher" or "hoàn tiền" inside a note never
+        // drop a real transfer or flip its direction.
+        let combinedForMatching = replacingMatches(of: momoMessageRegex, in: combined, with: "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let upperAscii = stripVietnameseAccents(combinedForMatching).uppercased()
+        let combinedWithoutBalance = replacingMatches(of: balanceRegex, in: combinedForMatching, with: " ")
 
         if promoKeywords.contains(where: { upperAscii.contains($0) }),
            firstMatch(of: signedAmountRegex, in: combinedWithoutBalance) == nil {
             return nil
         }
 
-        guard let extracted = extractAmountDirectionAndTime(from: combined, fallbackDate: raw.receivedAt) else {
+        guard let extracted = extractAmountDirectionAndTime(from: combinedForMatching, fallbackDate: raw.receivedAt) else {
             return nil
         }
 
@@ -221,6 +267,16 @@ public enum NotificationParser {
         return trace.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
+    private static func extractMoMoMessage(from rawBody: String) -> String? {
+        guard let msgMatch = firstMatch(of: momoMessageRegex, in: rawBody),
+              let rawMsg = capturedGroup("msg", in: msgMatch, text: rawBody) else {
+            return nil
+        }
+        let quoteSet = CharacterSet.whitespacesAndNewlines.union(CharacterSet(charactersIn: "\"'“”"))
+        let cleaned = rawMsg.trimmingCharacters(in: quoteSet)
+        return cleaned.isEmpty ? nil : cleaned
+    }
+
     private static func extractDescription(rawTitle: String, rawBody: String) -> String {
         let combined = "\(rawTitle)\n\(rawBody)".trimmingCharacters(in: .whitespacesAndNewlines)
         let upperAscii = stripVietnameseAccents(combined).uppercased()
@@ -229,6 +285,7 @@ public enum NotificationParser {
         if upperAscii.contains("MOMO-CASHOUT") { return "MOMO-CASHOUT" }
 
         let trimChars = CharacterSet.whitespacesAndNewlines.union(CharacterSet(charactersIn: ".:-|"))
+        let simpleTrim = CharacterSet.whitespacesAndNewlines.union(CharacterSet(charactersIn: ".:-"))
 
         if let ndMatch = firstMatch(of: ndRegex, in: combined),
            let val = capturedGroup("val", in: ndMatch, text: combined) {
@@ -239,15 +296,53 @@ public enum NotificationParser {
             }
         }
 
+        if upperAscii.contains("TUI THAN TAI") {
+            return "Tiền lời Túi Thần Tài"
+        }
+
+        if let refundMatch = firstMatch(of: momoRefundRegex, in: rawBody),
+           let merchantRaw = capturedGroup("merchant", in: refundMatch, text: rawBody) {
+            let merchant = merchantRaw.trimmingCharacters(in: simpleTrim)
+            if !merchant.isEmpty {
+                return "Hoàn tiền - \(merchant)"
+            }
+        }
+
         let trimmedBody = rawBody.trimmingCharacters(in: .whitespacesAndNewlines)
         if let momoMatch = firstMatch(of: momoReceiveRegex, in: trimmedBody),
            let senderRaw = capturedGroup("sender", in: momoMatch, text: trimmedBody) {
-            let sender = senderRaw.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines.union(CharacterSet(charactersIn: ".:-")))
-            if let msgMatch = firstMatch(of: momoMessageRegex, in: rawBody),
-               let msg = capturedGroup("msg", in: msgMatch, text: rawBody) {
-                return "\(sender) - \(msg.trimmingCharacters(in: .whitespacesAndNewlines))"
+            let sender = senderRaw.trimmingCharacters(in: simpleTrim)
+            if let msg = extractMoMoMessage(from: rawBody) {
+                return "\(sender) - \(msg)"
             }
             return sender
+        }
+
+        if let receivedFrom = firstMatch(of: momoReceivedFromRegex, in: rawBody),
+           let senderRaw = capturedGroup("sender", in: receivedFrom, text: rawBody) {
+            let sender = senderRaw.trimmingCharacters(in: simpleTrim)
+            if let msg = extractMoMoMessage(from: rawBody) {
+                return "\(sender) - \(msg)"
+            }
+            if !sender.isEmpty {
+                return sender
+            }
+        }
+
+        if let paymentMatch = firstMatch(of: momoPaymentRegex, in: rawBody),
+           let merchantRaw = capturedGroup("merchant", in: paymentMatch, text: rawBody) {
+            let merchant = merchantRaw.trimmingCharacters(in: simpleTrim)
+            if !merchant.isEmpty {
+                return merchant
+            }
+        }
+
+        if let transferOut = firstMatch(of: momoTransferOutRegex, in: rawBody),
+           let recipientRaw = capturedGroup("recipient", in: transferOut, text: rawBody) {
+            let recipient = recipientRaw.trimmingCharacters(in: simpleTrim)
+            if !recipient.isEmpty {
+                return "Chuyển \(recipient)"
+            }
         }
 
         var cleaned = replacingMatches(of: balanceRegex, in: rawBody, with: " ")

@@ -128,6 +128,164 @@ class TestEngineEndToEnd(unittest.TestCase):
         self.assertEqual(engine.store.get_wallet(WalletId.MOMO).balance, 600_000)
         self.assertEqual(engine.store.get_wallet(WalletId.MBBANK).balance, 1_500_000)
 
+    def test_cross_app_linked_expense_mbbank_first_then_momo(self) -> None:
+        engine = ExpenseEngine()
+        t0 = datetime(2026, 11, 21, 11, 10, 0)
+        engine.reconcile_balances(
+            {WalletId.MBBANK: 3_000_000, WalletId.MOMO: 500_000}, now=t0
+        )
+
+        # MBBank fires first with raw gateway description
+        r_mb = engine.ingest_notification(
+            RawNotification(
+                source_app=WalletId.MBBANK,
+                title="Biến động số dư",
+                body=(
+                    "TK 0901234567|GD: -199,000VND 21/11/26 11:10|"
+                    "SD: 2,801,000VND| ND: MOMO 2611219988 - Ma giao dich/ Trace 888999"
+                ),
+                received_at=t0 + timedelta(seconds=2),
+            )
+        )
+        self.assertEqual(r_mb.status, "CREATED")
+
+        # MoMo fires 4s later with clean merchant name ("Apple Services")
+        r_momo = engine.ingest_notification(
+            RawNotification(
+                source_app=WalletId.MOMO,
+                title="Thanh toán thành công",
+                body="Bạn đã thanh toán thành công 199.000đ cho dịch vụ Apple Services.",
+                received_at=t0 + timedelta(seconds=6),
+            )
+        )
+        self.assertEqual(r_momo.status, "DUPLICATE")
+        self.assertIsNone(r_momo.prompt)
+        self.assertEqual(len(engine.store.list_transactions()), 1)
+        self.assertEqual(engine.store.get_wallet(WalletId.MBBANK).balance, 2_801_000)
+        self.assertEqual(engine.store.get_wallet(WalletId.MOMO).balance, 500_000)
+
+        merged = engine.store.list_transactions()[0]
+        self.assertEqual(merged.source_wallet_id, WalletId.MBBANK)
+        self.assertEqual(merged.description, "Apple Services")
+        self.assertEqual(merged.trace_id, "888999")
+
+    def test_cross_app_linked_expense_momo_first_then_mbbank_rehomes_wallet(self) -> None:
+        engine = ExpenseEngine()
+        t0 = datetime(2026, 11, 21, 11, 12, 0)
+        engine.reconcile_balances(
+            {WalletId.MBBANK: 3_000_000, WalletId.MOMO: 500_000}, now=t0
+        )
+
+        # MoMo fires FIRST -> temporarily deducts from Ví MoMo
+        r_momo = engine.ingest_notification(
+            RawNotification(
+                source_app=WalletId.MOMO,
+                title="Thanh toán thành công",
+                body="Bạn đã thanh toán thành công 75.000đ cho dịch vụ Grab.",
+                received_at=t0 + timedelta(seconds=5),
+            )
+        )
+        self.assertEqual(r_momo.status, "CREATED")
+        assert r_momo.transaction is not None
+        self.assertEqual(engine.store.get_wallet(WalletId.MOMO).balance, 425_000)
+
+        # User immediately tags it before MBBank push even arrives
+        engine.confirm_transaction(
+            r_momo.transaction.id, tag_id="tag_di_chuyen", note="Đi làm sáng"
+        )
+
+        # MBBank fires 8s later -> refunds Ví MoMo, re-homes tx to MBBank, keeps tag & "Grab"
+        r_mb = engine.ingest_notification(
+            RawNotification(
+                source_app=WalletId.MBBANK,
+                title="Biến động số dư",
+                body=(
+                    "TK 0901234567|GD: -75,000VND 21/11/26 11:12|"
+                    "SD: 2,925,000VND| ND: M_SERVICE 2611217766 - Ma giao dich/ Trace 444555"
+                ),
+                received_at=t0 + timedelta(seconds=13),
+            )
+        )
+        self.assertEqual(r_mb.status, "DUPLICATE")
+        self.assertEqual(len(engine.store.list_transactions()), 1)
+        self.assertEqual(engine.store.get_wallet(WalletId.MOMO).balance, 500_000)
+        self.assertEqual(engine.store.get_wallet(WalletId.MBBANK).balance, 2_925_000)
+
+        rehomed = engine.store.list_transactions()[0]
+        self.assertEqual(rehomed.source_wallet_id, WalletId.MBBANK)
+        self.assertEqual(rehomed.description, "Grab")
+        self.assertEqual(rehomed.tag_id, "tag_di_chuyen")
+        self.assertEqual(rehomed.note, "Đi làm sáng")
+        self.assertEqual(rehomed.status, TransactionStatus.CONFIRMED)
+        self.assertEqual(rehomed.trace_id, "444555")
+
+    def test_unrelated_same_amount_p2p_transfers_are_not_merged(self) -> None:
+        engine = ExpenseEngine()
+        t0 = datetime(2026, 11, 21, 12, 0, 0)
+        engine.reconcile_balances(
+            {WalletId.MBBANK: 1_000_000, WalletId.MOMO: 500_000}, now=t0
+        )
+
+        r_mb = engine.ingest_notification(
+            RawNotification(
+                source_app=WalletId.MBBANK,
+                title="Biến động số dư",
+                body=(
+                    "TK 0901234567|GD: -50,000VND 21/11/26 12:00|"
+                    "SD: 950,000VND| ND: NGUYEN VAN A chuyen tien - Ma giao dich/ Trace 111222"
+                ),
+                received_at=t0 + timedelta(seconds=2),
+            )
+        )
+        r_momo = engine.ingest_notification(
+            RawNotification(
+                source_app=WalletId.MOMO,
+                title="Chuyển tiền thành công",
+                body="Bạn đã chuyển 50.000đ cho Lê Minh Khôi (0912345678).",
+                received_at=t0 + timedelta(seconds=20),
+            )
+        )
+        self.assertEqual(r_mb.status, "CREATED")
+        self.assertEqual(r_momo.status, "CREATED")
+        self.assertEqual(len(engine.store.list_transactions()), 2)
+        self.assertEqual(engine.store.get_wallet(WalletId.MBBANK).balance, 950_000)
+        self.assertEqual(engine.store.get_wallet(WalletId.MOMO).balance, 450_000)
+
+    def test_internal_transfer_reverse_order_momo_before_mbbank_self_heals(self) -> None:
+        engine = ExpenseEngine()
+        t0 = datetime(2026, 11, 21, 13, 0, 0)
+        engine.reconcile_balances(
+            {WalletId.MBBANK: 2_000_000, WalletId.MOMO: 100_000}, now=t0
+        )
+
+        # MoMo notifies top-up first
+        r_momo = engine.ingest_notification(
+            RawNotification(
+                source_app=WalletId.MOMO,
+                title="Nạp tiền thành công",
+                body="Bạn đã nạp 500.000đ từ MBBank vào Ví MoMo.",
+                received_at=t0 + timedelta(seconds=3),
+            )
+        )
+        self.assertEqual(r_momo.status, "CREATED")
+
+        # MBBank notifies MOMO-CASHIN 5s later -> removes premature MoMo leg & records clean internal transfer
+        r_mb = engine.ingest_notification(
+            RawNotification(
+                source_app=WalletId.MBBANK,
+                title="Biến động số dư",
+                body=(
+                    "TK 0901234567|GD: -500,000VND 21/11/26 13:00|"
+                    "SD: 1,500,000VND| ND: MOMO-CASHIN - Ma giao dich/ Trace 555666"
+                ),
+                received_at=t0 + timedelta(seconds=8),
+            )
+        )
+        self.assertEqual(r_mb.status, "CREATED")
+        self.assertEqual(len(engine.store.list_transactions()), 1)
+        self.assertEqual(engine.store.get_wallet(WalletId.MBBANK).balance, 1_500_000)
+        self.assertEqual(engine.store.get_wallet(WalletId.MOMO).balance, 600_000)
+
 
 if __name__ == "__main__":
     unittest.main()
