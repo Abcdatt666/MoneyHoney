@@ -37,6 +37,15 @@ struct IngestNotificationIntent: AppIntent {
     @Parameter(title: "Nội dung thông báo")
     var notificationBody: String
 
+    @Parameter(title: "Tên địa điểm (tùy chọn)", default: nil)
+    var locationName: String?
+
+    @Parameter(title: "Vĩ độ / Latitude (tùy chọn)", default: nil)
+    var latitude: Double?
+
+    @Parameter(title: "Kinh độ / Longitude (tùy chọn)", default: nil)
+    var longitude: Double?
+
     @MainActor
     func perform() async throws -> some IntentResult {
         let store = SwiftDataExpenseStore()
@@ -45,7 +54,10 @@ struct IngestNotificationIntent: AppIntent {
             sourceApp: sourceApp.walletId,
             title: notificationTitle,
             body: notificationBody,
-            receivedAt: Date()
+            receivedAt: Date(),
+            locationName: locationName,
+            latitude: latitude,
+            longitude: longitude
         )
         let result = engine.ingestNotification(raw)
 

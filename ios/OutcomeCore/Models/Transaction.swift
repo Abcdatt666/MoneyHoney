@@ -19,6 +19,9 @@ public struct Transaction: Identifiable, Equatable, Codable, Sendable, Hashable 
     public var rawNotificationText: String?
     public var reportedBalanceAfter: Int?
     public var confirmedAt: Date?
+    public var locationName: String?
+    public var latitude: Double?
+    public var longitude: Double?
 
     public init(
         id: String = UUID().uuidString,
@@ -37,7 +40,10 @@ public struct Transaction: Identifiable, Equatable, Codable, Sendable, Hashable 
         traceId: String? = nil,
         rawNotificationText: String? = nil,
         reportedBalanceAfter: Int? = nil,
-        confirmedAt: Date? = nil
+        confirmedAt: Date? = nil,
+        locationName: String? = nil,
+        latitude: Double? = nil,
+        longitude: Double? = nil
     ) {
         self.id = id
         self.txType = txType
@@ -56,5 +62,8 @@ public struct Transaction: Identifiable, Equatable, Codable, Sendable, Hashable 
         self.rawNotificationText = rawNotificationText
         self.reportedBalanceAfter = reportedBalanceAfter
         self.confirmedAt = confirmedAt
+        self.locationName = locationName
+        self.latitude = latitude
+        self.longitude = longitude
     }
 }

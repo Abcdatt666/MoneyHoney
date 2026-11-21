@@ -22,6 +22,7 @@ final class AppCoordinator {
     var pendingTransactions: [Transaction] = []
     var allTransactions: [Transaction] = []
     var reconciliations: [BalanceReconciliation] = []
+    var mbbankDiscrepancy: MBBankBalanceDiscrepancy?
 
     var activeTaggingTransaction: Transaction?
     var isPresentingManualEntry: Bool = false
@@ -126,6 +127,7 @@ final class AppCoordinator {
         pendingTransactions = engine.listPendingTransactions()
         allTransactions = engine.listAllTransactions()
         reconciliations = engine.listReconciliations()
+        mbbankDiscrepancy = engine.detectMBBankDiscrepancy()
     }
 
     func suggestTags(for tx: Transaction, limit: Int = 3) -> [Tag] {
@@ -151,7 +153,11 @@ final class AppCoordinator {
         tagId: String,
         description: String,
         note: String,
-        occurredAt: Date
+        occurredAt: Date,
+        locationName: String? = nil,
+        latitude: Double? = nil,
+        longitude: Double? = nil,
+        clearLocation: Bool = false
     ) {
         do {
             try engine.updateTransaction(
@@ -162,7 +168,11 @@ final class AppCoordinator {
                 tagId: tagId,
                 description: description,
                 note: note,
-                occurredAt: occurredAt
+                occurredAt: occurredAt,
+                locationName: locationName,
+                latitude: latitude,
+                longitude: longitude,
+                clearLocation: clearLocation
             )
             ReminderScheduler.removeDeliveredTransactionPrompt(txId: txId)
             activeTaggingTransaction = nil
@@ -178,7 +188,10 @@ final class AppCoordinator {
         amount: Int,
         tagId: String,
         description: String,
-        note: String
+        note: String,
+        locationName: String? = nil,
+        latitude: Double? = nil,
+        longitude: Double? = nil
     ) {
         do {
             try engine.addManualTransaction(
@@ -187,7 +200,10 @@ final class AppCoordinator {
                 amount: amount,
                 tagId: tagId,
                 description: description,
-                note: note
+                note: note,
+                locationName: locationName,
+                latitude: latitude,
+                longitude: longitude
             )
             isPresentingManualEntry = false
             refresh()

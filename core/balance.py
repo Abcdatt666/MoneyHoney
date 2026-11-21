@@ -28,6 +28,8 @@ def _apply_delta(store: Store, tx: Transaction, multiplier: int) -> None:
     if tx.tx_type == TransactionType.INTERNAL_TRANSFER:
         if tx.target_wallet_id is None:
             raise ValueError("Internal transfer must define target_wallet_id")
+        if tx.source_wallet_id == tx.target_wallet_id:
+            return
         src = store.get_wallet(tx.source_wallet_id)
         dst = store.get_wallet(tx.target_wallet_id)
         src.balance -= multiplier * tx.amount

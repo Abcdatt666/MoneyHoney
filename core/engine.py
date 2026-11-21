@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
+import re
 from typing import Dict, List, Optional
 import unicodedata
 from uuid import uuid4
@@ -55,12 +56,24 @@ class DashboardSummary:
     next_reconciliation_reminder: datetime
 
 
+@dataclass(frozen=True)
+class MBBankBalanceDiscrepancy:
+    """Discrepancy between MBBank's latest SD: balance and app balance."""
+
+    reported_balance: int
+    app_balance: int
+    delta: int
+    reported_at: datetime
+
+
 def _format_vnd(amount: int) -> str:
     return f"{amount:,}đ".replace(",", ".")
 
 
 _CROSS_APP_WINDOW_SECONDS = 120.0
+_SAME_BANK_SELF_TRANSFER_WINDOW_SECONDS = 30.0
 _CROSS_APP_MERGE_DELIMITER = " || "
+_MB_ACCOUNT_RE = re.compile(r"\bTK\s+(?P<acct>[A-Z0-9x*]+)", re.IGNORECASE)
 
 _MBBANK_MOMO_GATEWAY_MARKERS: tuple[str, ...] = (
     "MOMO",
@@ -68,6 +81,9 @@ _MBBANK_MOMO_GATEWAY_MARKERS: tuple[str, ...] = (
     "MSERVICE",
     "M SERVICE",
     "VI MOMO",
+    "AP-CASHIN",
+    "AP CASHIN",
+    "BANK2WALLET",
     "NAPAS",
 )
 
@@ -135,15 +151,21 @@ class ExpenseEngine:
         created_at = raw.received_at
         raw_text = f"{raw.title} | {raw.body}".strip(" |")
 
-        # Reconcile cross-app linked-bank expense (e.g., Apple Services / Grab billed
-        # through MoMo using linked MBBank account) regardless of which app notifies first.
-        merged_tx = self._reconcile_cross_app_linked_expense(raw, parsed, raw_text)
-        if merged_tx is not None:
-            return IngestResult(
-                status="DUPLICATE",
-                transaction=merged_tx,
-                reason="Merged linked MoMo/MBBank expense into a single MBBank transaction.",
-            )
+        # Reconcile cross-app linked-bank expense (e.g., Apple Services / Grab / WiFi bill
+        # paid through MoMo using linked MBBank account) regardless of arrival order or
+        # whether MBBank labels the debit as MOMO-CASHIN.
+        reconciled = self._reconcile_cross_app_linked_expense(raw, parsed, raw_text)
+        if reconciled is not None:
+            return reconciled
+
+        # Detect self-transfer between two different MBBank accounts of the same user.
+        self_transfer = self._reconcile_same_bank_self_transfer(raw, parsed, raw_text)
+        if self_transfer is not None:
+            return self_transfer
+
+        clean_location_name = (
+            " ".join(raw.location_name.strip().split()) if raw.location_name else None
+        ) or None
 
         if parsed.tx_type == TransactionType.INTERNAL_TRANSFER:
             # Self-heal if MoMo fired its wallet-side notification a few seconds
@@ -166,6 +188,9 @@ class ExpenseEngine:
                 occurred_at=parsed.occurred_at,
                 created_at=created_at,
                 confirmed_at=created_at,
+                location_name=clean_location_name,
+                latitude=raw.latitude,
+                longitude=raw.longitude,
             )
             apply_transaction_balances(
                 self.store, tx, sync_reported_balance=self.sync_mbbank_reported_balance
@@ -201,6 +226,9 @@ class ExpenseEngine:
             reported_balance_after=parsed.reported_balance_after,
             occurred_at=parsed.occurred_at,
             created_at=created_at,
+            location_name=clean_location_name,
+            latitude=raw.latitude,
+            longitude=raw.longitude,
         )
         apply_transaction_balances(
             self.store, tx, sync_reported_balance=self.sync_mbbank_reported_balance
@@ -255,8 +283,6 @@ class ExpenseEngine:
         existing = self.store.get_transaction(tx_id)
         if existing is None:
             raise KeyError(f"Transaction not found: {tx_id}")
-        if existing.tx_type == TransactionType.INTERNAL_TRANSFER:
-            raise ValueError("Cannot edit an internal transfer")
         if amount <= 0:
             raise ValueError("Transaction amount must be positive")
         tag = self.store.get_tag(tag_id)
@@ -266,6 +292,7 @@ class ExpenseEngine:
         reverse_transaction_balances(self.store, existing)
 
         existing.source_wallet_id = wallet_id
+        existing.target_wallet_id = None
         existing.direction = direction
         existing.tx_type = (
             TransactionType.EXPENSE if direction == Direction.OUT else TransactionType.INCOME
@@ -290,6 +317,31 @@ class ExpenseEngine:
             history=self.store.list_transactions(),
             available_tags=self.store.list_tags(),
             limit=limit,
+        )
+
+    def detect_mbbank_discrepancy(self) -> Optional[MBBankBalanceDiscrepancy]:
+        mb = self.store.get_wallet(WalletId.MBBANK)
+        mb_txs = [
+            tx
+            for tx in self.store.list_transactions()
+            if tx.source_wallet_id == WalletId.MBBANK or tx.target_wallet_id == WalletId.MBBANK
+        ]
+        if not mb_txs:
+            return None
+        newest = mb_txs[0]
+        if newest.reported_balance_after is None:
+            return None
+        if newest.tx_type == TransactionType.INTERNAL_TRANSFER and newest.target_wallet_id == WalletId.MBBANK:
+            return None
+        if mb.last_reconciled_at is not None and mb.last_reconciled_at >= newest.occurred_at:
+            return None
+        if newest.reported_balance_after == mb.balance:
+            return None
+        return MBBankBalanceDiscrepancy(
+            reported_balance=newest.reported_balance_after,
+            app_balance=mb.balance,
+            delta=newest.reported_balance_after - mb.balance,
+            reported_at=newest.occurred_at,
         )
 
     def add_manual_transaction(
@@ -437,6 +489,62 @@ class ExpenseEngine:
             next_reconciliation_reminder=get_next_reconciliation_reminder(ref),
         )
 
+    def _extract_mb_account_number(self, text: Optional[str]) -> Optional[str]:
+        if not text:
+            return None
+        match = _MB_ACCOUNT_RE.search(text)
+        return match.group("acct").upper() if match else None
+
+    def _reconcile_same_bank_self_transfer(
+        self, raw: RawNotification, parsed: ParsedTransaction, raw_text: str
+    ) -> Optional[IngestResult]:
+        if raw.source_app != WalletId.MBBANK:
+            return None
+        if parsed.tx_type not in (TransactionType.EXPENSE, TransactionType.INCOME):
+            return None
+        incoming_acct = self._extract_mb_account_number(raw_text)
+        if not incoming_acct:
+            return None
+
+        for existing in self.store.list_transactions():
+            if existing.is_manual or existing.source_wallet_id != WalletId.MBBANK:
+                continue
+            if existing.tx_type not in (TransactionType.EXPENSE, TransactionType.INCOME):
+                continue
+            if existing.direction == parsed.direction or existing.amount != parsed.amount:
+                continue
+            if (
+                existing.raw_notification_text
+                and _CROSS_APP_MERGE_DELIMITER in existing.raw_notification_text
+            ):
+                continue
+            occurred_delta = abs((parsed.occurred_at - existing.occurred_at).total_seconds())
+            received_delta = abs((raw.received_at - existing.created_at).total_seconds())
+            if min(occurred_delta, received_delta) > _SAME_BANK_SELF_TRANSFER_WINDOW_SECONDS:
+                continue
+            existing_acct = self._extract_mb_account_number(existing.raw_notification_text)
+            if not existing_acct or existing_acct == incoming_acct:
+                continue
+
+            reverse_transaction_balances(self.store, existing)
+            existing.tx_type = TransactionType.INTERNAL_TRANSFER
+            existing.source_wallet_id = WalletId.MBBANK
+            existing.target_wallet_id = WalletId.MBBANK
+            existing.direction = Direction.OUT
+            existing.status = TransactionStatus.CONFIRMED
+            existing.confirmed_at = raw.received_at
+            existing.description = "Chuyển giữa 2 TK MBBank"
+            existing.raw_notification_text = _CROSS_APP_MERGE_DELIMITER.join(
+                part for part in (existing.raw_notification_text, raw_text) if part
+            )
+            self.store.save_transaction(existing)
+            return IngestResult(
+                status="DUPLICATE",
+                transaction=existing,
+                reason="Merged opposite-direction MBBank notifications across two own accounts into an internal self-transfer.",
+            )
+        return None
+
     def _is_within_cross_app_window(
         self, existing: Transaction, raw: RawNotification, parsed: ParsedTransaction
     ) -> bool:
@@ -463,19 +571,63 @@ class ExpenseEngine:
 
     def _reconcile_cross_app_linked_expense(
         self, raw: RawNotification, parsed: ParsedTransaction, raw_text: str
-    ) -> Optional[Transaction]:
+    ) -> Optional[IngestResult]:
+        # Case A: Incoming MBBank MOMO-CASHIN arriving right after a MoMo bill payment
+        # expense of the exact same amount -> re-home the MoMo expense to MBBank.
+        if (
+            parsed.tx_type == TransactionType.INTERNAL_TRANSFER
+            and parsed.source_wallet_id == WalletId.MBBANK
+            and parsed.target_wallet_id == WalletId.MOMO
+        ):
+            for existing in self.store.list_transactions():
+                if existing.is_manual:
+                    continue
+                if (
+                    existing.tx_type != TransactionType.EXPENSE
+                    or existing.direction != Direction.OUT
+                    or existing.source_wallet_id != WalletId.MOMO
+                    or existing.amount != parsed.amount
+                ):
+                    continue
+                if (
+                    existing.raw_notification_text
+                    and _CROSS_APP_MERGE_DELIMITER in existing.raw_notification_text
+                ):
+                    continue
+                if not self._is_within_cross_app_window(existing, raw, parsed):
+                    continue
+
+                reverse_transaction_balances(self.store, existing)
+                existing.source_wallet_id = WalletId.MBBANK
+                existing.target_wallet_id = None
+                if parsed.trace_id:
+                    existing.trace_id = parsed.trace_id
+                if parsed.reported_balance_after is not None:
+                    existing.reported_balance_after = parsed.reported_balance_after
+                existing.occurred_at = parsed.occurred_at
+                existing.raw_notification_text = _CROSS_APP_MERGE_DELIMITER.join(
+                    part for part in (existing.raw_notification_text, raw_text) if part
+                )
+                apply_transaction_balances(
+                    self.store,
+                    existing,
+                    sync_reported_balance=self.sync_mbbank_reported_balance,
+                )
+                self.store.save_transaction(existing)
+                return IngestResult(
+                    status="DUPLICATE",
+                    transaction=existing,
+                    reason="Re-homed MoMo bill payment to MBBank from matching MOMO-CASHIN.",
+                )
+            return None
+
         if parsed.tx_type != TransactionType.EXPENSE or parsed.direction != Direction.OUT:
             return None
 
         for existing in self.store.list_transactions():
             if existing.is_manual:
                 continue
-            if (
-                existing.tx_type != TransactionType.EXPENSE
-                or existing.direction != Direction.OUT
-                or existing.amount != parsed.amount
-                or existing.source_wallet_id == parsed.source_wallet_id
-            ):
+            if existing.amount != parsed.amount:
                 continue
             if (
                 existing.raw_notification_text
@@ -483,6 +635,46 @@ class ExpenseEngine:
             ):
                 continue
             if not self._is_within_cross_app_window(existing, raw, parsed):
+                continue
+
+            # Case B: MBBank MOMO-CASHIN arrived first, then MoMo bill payment expense
+            # arrived within 120s -> convert internal transfer into an MBBank expense.
+            if (
+                parsed.source_wallet_id == WalletId.MOMO
+                and existing.tx_type == TransactionType.INTERNAL_TRANSFER
+                and existing.source_wallet_id == WalletId.MBBANK
+                and existing.target_wallet_id == WalletId.MOMO
+            ):
+                reverse_transaction_balances(self.store, existing)
+                existing.tx_type = TransactionType.EXPENSE
+                existing.source_wallet_id = WalletId.MBBANK
+                existing.target_wallet_id = None
+                existing.direction = Direction.OUT
+                existing.status = TransactionStatus.PENDING
+                existing.confirmed_at = None
+                if parsed.description and parsed.description != "Không rõ nội dung":
+                    existing.description = parsed.description
+                existing.raw_notification_text = _CROSS_APP_MERGE_DELIMITER.join(
+                    part for part in (existing.raw_notification_text, raw_text) if part
+                )
+                apply_transaction_balances(
+                    self.store,
+                    existing,
+                    sync_reported_balance=self.sync_mbbank_reported_balance,
+                )
+                self.store.save_transaction(existing)
+                return IngestResult(
+                    status="CREATED",
+                    transaction=existing,
+                    prompt=self._build_prompt(existing),
+                    reason="Converted MOMO-CASHIN internal transfer into MBBank expense using MoMo payment notification.",
+                )
+
+            if (
+                existing.tx_type != TransactionType.EXPENSE
+                or existing.direction != Direction.OUT
+                or existing.source_wallet_id == parsed.source_wallet_id
+            ):
                 continue
 
             # Order 1: MBBank arrived first, MoMo arrived second -> keep MBBank deduction,
@@ -504,7 +696,11 @@ class ExpenseEngine:
                     part for part in (existing.raw_notification_text, raw_text) if part
                 )
                 self.store.save_transaction(existing)
-                return existing
+                return IngestResult(
+                    status="DUPLICATE",
+                    transaction=existing,
+                    reason="Merged linked MoMo payment into existing MBBank expense.",
+                )
 
             # Order 2: MoMo arrived first, MBBank arrived second -> refund Ví MoMo,
             # re-home the transaction to MBBank, apply MBBank deduction, keep MoMo's
@@ -539,7 +735,11 @@ class ExpenseEngine:
                     sync_reported_balance=self.sync_mbbank_reported_balance,
                 )
                 self.store.save_transaction(existing)
-                return existing
+                return IngestResult(
+                    status="DUPLICATE",
+                    transaction=existing,
+                    reason="Re-homed linked MoMo expense to MBBank.",
+                )
 
         return None
 

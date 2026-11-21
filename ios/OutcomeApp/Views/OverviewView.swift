@@ -11,6 +11,7 @@ struct OverviewView: View {
     @State private var searchText: String = ""
     @State private var isShowingAllTransactions: Bool = false
     @State private var pendingDeletion: OutcomeCore.Transaction?
+    @State private var dismissedDiscrepancyTimestamp: Date?
 
     private var trimmedSearch: String {
         searchText.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -85,6 +86,11 @@ struct OverviewView: View {
                 VStack(alignment: .leading, spacing: OutcomeTheme.Layout.sectionSpacing) {
                     if !isSearching {
                         heroHeader
+
+                        if let discrepancy = coordinator.mbbankDiscrepancy,
+                           dismissedDiscrepancyTimestamp != discrepancy.reportedAt {
+                            mbbankDiscrepancyBanner(discrepancy)
+                        }
 
                         dualWalletRow
 
@@ -277,9 +283,7 @@ struct OverviewView: View {
                                 .padding(.leading, 50)
                         }
                         Button {
-                            if tx.txType != .internalTransfer {
-                                coordinator.activeTaggingTransaction = tx
-                            }
+                            coordinator.activeTaggingTransaction = tx
                         } label: {
                             TransactionRow(
                                 item: tx,
@@ -288,10 +292,11 @@ struct OverviewView: View {
                         }
                         .buttonStyle(.plain)
                         .contextMenu {
-                            if tx.txType != .internalTransfer {
-                                Button("Sửa & chọn tag", systemImage: "tag") {
-                                    coordinator.activeTaggingTransaction = tx
-                                }
+                            Button(
+                                tx.txType == .internalTransfer ? "Đổi thành Chi tiêu & gắn tag" : "Sửa & chọn tag",
+                                systemImage: "tag"
+                            ) {
+                                coordinator.activeTaggingTransaction = tx
                             }
                             Button("Xóa giao dịch", systemImage: "trash", role: .destructive) {
                                 pendingDeletion = tx
@@ -316,6 +321,51 @@ struct OverviewView: View {
         }
         .padding(16)
         .background(OutcomeTheme.Colors.card, in: .rect(cornerRadius: OutcomeTheme.Layout.cardRadius))
+    }
+
+    private func mbbankDiscrepancyBanner(_ discrepancy: MBBankBalanceDiscrepancy) -> some View {
+        HStack(spacing: 10) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .font(.subheadline)
+                .foregroundStyle(OutcomeTheme.Colors.pending)
+                .accessibilityHidden(true)
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text("MBBank lệch \(VNDFormatter.formatDelta(discrepancy.delta)) so với ngân hàng")
+                    .font(.footnote.bold())
+                    .monospacedDigit()
+                    .foregroundStyle(.primary)
+
+                Text(
+                    hideBalances
+                        ? "Có thể vừa sót 1 thông báo. Chạm Đối soát để khớp lại."
+                        : "Ngân hàng báo \(VNDFormatter.format(discrepancy.reportedBalance)) · Có thể sót 1 thông báo."
+                )
+                .font(.caption)
+                .monospacedDigit()
+                .foregroundStyle(.secondary)
+            }
+
+            Spacer(minLength: 4)
+
+            Button("Đối soát") {
+                coordinator.selectedTab = .wallets
+            }
+            .font(.footnote.bold())
+            .foregroundStyle(OutcomeTheme.Colors.accent)
+            .frame(minHeight: OutcomeTheme.Layout.minTouchTarget)
+
+            Button("Ẩn cảnh báo", systemImage: "xmark") {
+                dismissedDiscrepancyTimestamp = discrepancy.reportedAt
+            }
+            .labelStyle(.iconOnly)
+            .font(.caption)
+            .foregroundStyle(.secondary)
+            .frame(minWidth: OutcomeTheme.Layout.minTouchTarget, minHeight: OutcomeTheme.Layout.minTouchTarget)
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 8)
+        .background(OutcomeTheme.Colors.card, in: .rect(cornerRadius: OutcomeTheme.Layout.chipRadius))
     }
 
     private var privacyToggleButton: some View {

@@ -87,6 +87,9 @@ final class TransactionRecord {
     var rawNotificationText: String?
     var reportedBalanceAfter: Int?
     var confirmedAt: Date?
+    var locationName: String?
+    var latitude: Double?
+    var longitude: Double?
 
     init(from tx: Transaction) {
         self.id = tx.id
@@ -106,6 +109,9 @@ final class TransactionRecord {
         self.rawNotificationText = tx.rawNotificationText
         self.reportedBalanceAfter = tx.reportedBalanceAfter
         self.confirmedAt = tx.confirmedAt
+        self.locationName = tx.locationName
+        self.latitude = tx.latitude
+        self.longitude = tx.longitude
     }
 
     func update(from tx: Transaction) {
@@ -125,6 +131,9 @@ final class TransactionRecord {
         rawNotificationText = tx.rawNotificationText
         reportedBalanceAfter = tx.reportedBalanceAfter
         confirmedAt = tx.confirmedAt
+        locationName = tx.locationName
+        latitude = tx.latitude
+        longitude = tx.longitude
     }
 
     func toDomain() -> Transaction {
@@ -145,7 +154,10 @@ final class TransactionRecord {
             traceId: traceId,
             rawNotificationText: rawNotificationText,
             reportedBalanceAfter: reportedBalanceAfter,
-            confirmedAt: confirmedAt
+            confirmedAt: confirmedAt,
+            locationName: locationName,
+            latitude: latitude,
+            longitude: longitude
         )
     }
 }

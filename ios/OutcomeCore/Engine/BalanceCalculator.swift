@@ -28,6 +28,9 @@ public enum BalanceCalculator {
             guard let targetId = tx.targetWalletId else {
                 throw BalanceError.internalTransferMissingTarget
             }
+            if tx.sourceWalletId == targetId {
+                return
+            }
             var src = store.getWallet(tx.sourceWalletId)
             var dst = store.getWallet(targetId)
             src.balance -= multiplier * tx.amount

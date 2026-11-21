@@ -159,7 +159,7 @@ class TestParser(unittest.TestCase):
         self.assertEqual(r4.amount, 50000)
         self.assertEqual(r4.description, "Hoàn tiền - Shopee")
 
-        # 5) Tiền lời Túi Thần Tài
+        # 5) Tiền lời Túi Thần Tài -> bỏ qua (cộng vào Túi Thần Tài, không vào Ví MoMo chính)
         r5 = parse_notification(
             RawNotification(
                 source_app=WalletId.MOMO,
@@ -168,10 +168,37 @@ class TestParser(unittest.TestCase):
                 received_at=self.ts,
             )
         )
-        assert r5 is not None
-        self.assertEqual(r5.tx_type, TransactionType.INCOME)
-        self.assertEqual(r5.amount, 1250)
-        self.assertEqual(r5.description, "Tiền lời Túi Thần Tài")
+        self.assertIsNone(r5)
+
+        # 5b) Rút tiền từ Túi Thần Tài về Ví MoMo -> THU vào Ví MoMo
+        r5b = parse_notification(
+            RawNotification(
+                source_app=WalletId.MOMO,
+                title="Túi Thần Tài",
+                body="Giao dịch rút 500.000đ từ Túi Thần Tài về Ví MoMo thành công.",
+                received_at=self.ts,
+            )
+        )
+        assert r5b is not None
+        self.assertEqual(r5b.tx_type, TransactionType.INCOME)
+        self.assertEqual(r5b.direction, Direction.IN)
+        self.assertEqual(r5b.amount, 500000)
+        self.assertEqual(r5b.description, "Rút Túi Thần Tài")
+
+        # 5c) Nạp / Tự động tích lũy từ Ví MoMo vào Túi Thần Tài -> CHI khỏi Ví MoMo
+        r5c = parse_notification(
+            RawNotification(
+                source_app=WalletId.MOMO,
+                title="Túi Thần Tài",
+                body="[Túi Thần Tài] Hệ thống đã tự động tích lũy 300.000đ từ Ví MoMo của bạn.",
+                received_at=self.ts,
+            )
+        )
+        assert r5c is not None
+        self.assertEqual(r5c.tx_type, TransactionType.EXPENSE)
+        self.assertEqual(r5c.direction, Direction.OUT)
+        self.assertEqual(r5c.amount, 300000)
+        self.assertEqual(r5c.description, "Nạp Túi Thần Tài")
 
         # 6) Chuyển tiền đi từ MoMo (kể cả khi Lời nhắn chứa chữ "hoàn tiền")
         r6 = parse_notification(
@@ -251,6 +278,86 @@ class TestParser(unittest.TestCase):
         self.assertIsNone(parse_notification(promo))
         self.assertIsNone(parse_notification(gift_card_promo))
         self.assertIsNone(parse_notification(otp))
+
+    def test_hardened_bank_and_momo_edge_cases(self) -> None:
+        # #1) MBBank credit card statement reminder, credit card spend, savings book -> ignored
+        cc_statement = RawNotification(
+            source_app=WalletId.MBBANK,
+            title="Thông báo sao kê",
+            body="Thong bao sao ke the tin dung thang 11/2026. Tong du no: VND 5,200,000. Vui long thanh toan truoc ngay 25-11-2026.",
+            received_at=self.ts,
+        )
+        cc_spend = RawNotification(
+            source_app=WalletId.MBBANK,
+            title="Biến động thẻ",
+            body="The tin dung VISA 4084xxxxxx phat sinh giao dich chi tieu VND 1,500,000 tai THE COFFEE HOUSE. So du kha dung: VND 18,500,000.",
+            received_at=self.ts,
+        )
+        savings = RawNotification(
+            source_app=WalletId.MBBANK,
+            title="Tiết kiệm số",
+            body="Quy khach da mo thanh cong So tiet kiem so 0123xxxxxx so tien 50,000,000 VND.",
+            received_at=self.ts,
+        )
+        self.assertIsNone(parse_notification(cc_statement))
+        self.assertIsNone(parse_notification(cc_spend))
+        self.assertIsNone(parse_notification(savings))
+
+        # #2) MoMo Ví Trả Sau debt reminder & postpaid payment -> ignored
+        vts_reminder = RawNotification(
+            source_app=WalletId.MOMO,
+            title="Nhắc thanh toán Ví Trả Sau",
+            body="Toàn bộ dư nợ Ví Trả Sau của bạn là 1.850.000đ. Vui lòng thanh toán trước ngày 05/12.",
+            received_at=self.ts,
+        )
+        vts_payment = RawNotification(
+            source_app=WalletId.MOMO,
+            title="Thanh toán thành công",
+            body="Thanh toán thành công 150.000đ cho Shopee bằng nguồn Ví Trả Sau.",
+            received_at=self.ts,
+        )
+        self.assertIsNone(parse_notification(vts_reminder))
+        self.assertIsNone(parse_notification(vts_payment))
+
+        # #4) MBBank MOMO_CASHIN (underscore variant) -> internal transfer
+        cashin_underscore = parse_notification(
+            RawNotification(
+                source_app=WalletId.MBBANK,
+                title="Biến động số dư",
+                body="TK 0901234567|GD: -200,000VND 21/11/26 10:00|SD: 5,000,000VND| ND: MOMO_CASHIN 0901234567",
+                received_at=self.ts,
+            )
+        )
+        assert cashin_underscore is not None
+        self.assertEqual(cashin_underscore.tx_type, TransactionType.INTERNAL_TRANSFER)
+        self.assertEqual(cashin_underscore.amount, 200000)
+
+        # #5 & #6) MBBank prefix currency (VND 99,000) & "So du kha dung:" stripped properly
+        fee_tx = parse_notification(
+            RawNotification(
+                source_app=WalletId.MBBANK,
+                title="Thông báo thu phí",
+                body="Giao dich tru phi thuong nien the 9704xxxxxx so tien VND 99,000. So du kha dung: VND 1,450,000.",
+                received_at=self.ts,
+            )
+        )
+        assert fee_tx is not None
+        self.assertEqual(fee_tx.tx_type, TransactionType.EXPENSE)
+        self.assertEqual(fee_tx.amount, 99000)
+        self.assertEqual(fee_tx.reported_balance_after, 1450000)
+
+        # #8) Decimal .00 tail does not multiply by 100x
+        dec_tx = parse_notification(
+            RawNotification(
+                source_app=WalletId.MBBANK,
+                title="Biến động số dư",
+                body="TK 0901234567|GD: -150,000.00VND 21/11/26 10:15|SD: 4,850,000.00VND| ND: Thanh toan",
+                received_at=self.ts,
+            )
+        )
+        assert dec_tx is not None
+        self.assertEqual(dec_tx.amount, 150000)
+        self.assertEqual(dec_tx.reported_balance_after, 4850000)
 
 
 if __name__ == "__main__":

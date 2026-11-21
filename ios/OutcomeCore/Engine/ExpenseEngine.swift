@@ -1,5 +1,20 @@
 import Foundation
 
+/// Discrepancy between MBBank's latest `SD:` balance and Outcome's computed MBBank balance.
+public struct MBBankBalanceDiscrepancy: Equatable, Sendable {
+    public let reportedBalance: Int
+    public let appBalance: Int
+    public let delta: Int
+    public let reportedAt: Date
+
+    public init(reportedBalance: Int, appBalance: Int, reportedAt: Date) {
+        self.reportedBalance = reportedBalance
+        self.appBalance = appBalance
+        self.delta = reportedBalance - appBalance
+        self.reportedAt = reportedAt
+    }
+}
+
 /// Main orchestration facade for the offline expense tracker core logic.
 @MainActor
 public final class ExpenseEngine {
@@ -13,7 +28,13 @@ public final class ExpenseEngine {
     }
 
     private static let crossAppWindowSeconds: TimeInterval = 120
+    private static let sameBankSelfTransferWindowSeconds: TimeInterval = 30
     private static let crossAppMergeDelimiter = " || "
+
+    private static let mbAccountRegex = try! NSRegularExpression(
+        pattern: #"\bTK\s+(?<acct>[A-Z0-9x*]+)"#,
+        options: [.caseInsensitive]
+    )
 
     private static let mbbankMoMoGatewayMarkers: [String] = [
         "MOMO",
@@ -21,6 +42,9 @@ public final class ExpenseEngine {
         "MSERVICE",
         "M SERVICE",
         "VI MOMO",
+        "AP-CASHIN",
+        "AP CASHIN",
+        "BANK2WALLET",
         "NAPAS",
     ]
 
@@ -81,15 +105,20 @@ public final class ExpenseEngine {
         let rawText = "\(raw.title) | \(raw.body)"
             .trimmingCharacters(in: CharacterSet.whitespacesAndNewlines.union(CharacterSet(charactersIn: "|")))
 
-        // Reconcile cross-app linked-bank expense (e.g., Apple Services / Grab billed
-        // through MoMo using linked MBBank account) regardless of which app notifies first.
-        if let mergedTx = reconcileCrossAppLinkedExpense(raw: raw, parsed: parsed, rawText: rawText) {
-            return IngestResult(
-                status: .duplicate,
-                transaction: mergedTx,
-                reason: "Merged linked MoMo/MBBank expense into a single MBBank transaction."
-            )
+        // Reconcile cross-app linked-bank expense (e.g., Apple Services / Grab / WiFi bill
+        // paid through MoMo using linked MBBank account) regardless of arrival order or
+        // whether MBBank labels the debit as MOMO-CASHIN.
+        if let reconciled = reconcileCrossAppLinkedExpense(raw: raw, parsed: parsed, rawText: rawText) {
+            return reconciled
         }
+
+        // Detect self-transfer between two different MBBank accounts of the same user
+        // (e.g., TK A -1,000,000 and TK B +1,000,000 within 30s) so monthly stats aren't inflated.
+        if let selfTransfer = reconcileSameBankSelfTransfer(raw: raw, parsed: parsed, rawText: rawText) {
+            return selfTransfer
+        }
+
+        let cleanLocationName = normalizedLocationName(raw.locationName)
 
         if parsed.txType == .internalTransfer {
             // Self-heal if MoMo fired its wallet-side notification a few seconds
@@ -110,7 +139,10 @@ public final class ExpenseEngine {
                 traceId: parsed.traceId,
                 rawNotificationText: rawText,
                 reportedBalanceAfter: parsed.reportedBalanceAfter,
-                confirmedAt: createdAt
+                confirmedAt: createdAt,
+                locationName: cleanLocationName,
+                latitude: raw.latitude,
+                longitude: raw.longitude
             )
             try? BalanceCalculator.applyTransactionBalances(
                 store: store,
@@ -145,7 +177,10 @@ public final class ExpenseEngine {
             isManual: false,
             traceId: parsed.traceId,
             rawNotificationText: rawText,
-            reportedBalanceAfter: parsed.reportedBalanceAfter
+            reportedBalanceAfter: parsed.reportedBalanceAfter,
+            locationName: cleanLocationName,
+            latitude: raw.latitude,
+            longitude: raw.longitude
         )
         try? BalanceCalculator.applyTransactionBalances(
             store: store,
@@ -186,8 +221,9 @@ public final class ExpenseEngine {
         return tx
     }
 
-    /// Update any editable field of a non-internal transaction while keeping
-    /// both wallet balances mathematically exact.
+    /// Update any editable field of a transaction (including converting a
+    /// `MOMO-CASHIN` / `MOMO-CASHOUT` internal transfer into a regular expense or
+    /// income) while keeping both wallet balances mathematically exact.
     @discardableResult
     public func updateTransaction(
         txId: String,
@@ -198,13 +234,14 @@ public final class ExpenseEngine {
         description: String,
         note: String,
         occurredAt: Date,
+        locationName: String? = nil,
+        latitude: Double? = nil,
+        longitude: Double? = nil,
+        clearLocation: Bool = false,
         now: Date = Date()
     ) throws -> Transaction {
         guard let existing = store.getTransaction(txId) else {
             throw EngineError.transactionNotFound(txId)
-        }
-        guard existing.txType != .internalTransfer else {
-            throw EngineError.cannotTagInternalTransfer
         }
         guard amount > 0 else {
             throw EngineError.nonPositiveAmount
@@ -217,6 +254,7 @@ public final class ExpenseEngine {
 
         var updated = existing
         updated.sourceWalletId = walletId
+        updated.targetWalletId = nil
         updated.direction = direction
         updated.txType = direction == .out ? .expense : .income
         updated.amount = amount
@@ -228,6 +266,22 @@ public final class ExpenseEngine {
         updated.status = .confirmed
         updated.confirmedAt = existing.confirmedAt ?? now
 
+        if clearLocation {
+            updated.locationName = nil
+            updated.latitude = nil
+            updated.longitude = nil
+        } else {
+            if let locationName {
+                updated.locationName = normalizedLocationName(locationName)
+            }
+            if let latitude {
+                updated.latitude = latitude
+            }
+            if let longitude {
+                updated.longitude = longitude
+            }
+        }
+
         try BalanceCalculator.applyTransactionBalances(
             store: store,
             tx: updated,
@@ -235,6 +289,33 @@ public final class ExpenseEngine {
         )
         store.saveTransaction(updated)
         return updated
+    }
+
+    public func detectMBBankDiscrepancy() -> MBBankBalanceDiscrepancy? {
+        let mb = store.getWallet(.mbbank)
+        let mbTransactions = store.listTransactions().filter {
+            $0.sourceWalletId == .mbbank || $0.targetWalletId == .mbbank
+        }
+        guard let newestMbTx = mbTransactions.first,
+              let reported = newestMbTx.reportedBalanceAfter else {
+            return nil
+        }
+        // If this was a self-transfer between two MBBank accounts, `SD:` belongs to only
+        // one sub-account rather than total MBBank balance, so skip false discrepancy alerts.
+        if newestMbTx.txType == .internalTransfer && newestMbTx.targetWalletId == .mbbank {
+            return nil
+        }
+        if let reconciledAt = mb.lastReconciledAt, reconciledAt >= newestMbTx.occurredAt {
+            return nil
+        }
+        guard reported != mb.balance else {
+            return nil
+        }
+        return MBBankBalanceDiscrepancy(
+            reportedBalance: reported,
+            appBalance: mb.balance,
+            reportedAt: newestMbTx.occurredAt
+        )
     }
 
     public func suggestTags(for tx: Transaction, limit: Int = 3) -> [Tag] {
@@ -270,7 +351,10 @@ public final class ExpenseEngine {
         tagId: String,
         description: String = "",
         note: String = "",
-        occurredAt: Date = Date()
+        occurredAt: Date = Date(),
+        locationName: String? = nil,
+        latitude: Double? = nil,
+        longitude: Double? = nil
     ) throws -> Transaction {
         guard amount > 0 else {
             throw EngineError.nonPositiveAmount
@@ -292,7 +376,10 @@ public final class ExpenseEngine {
             tagId: tag.id,
             note: note.trimmingCharacters(in: .whitespacesAndNewlines),
             isManual: true,
-            confirmedAt: occurredAt
+            confirmedAt: occurredAt,
+            locationName: normalizedLocationName(locationName),
+            latitude: latitude,
+            longitude: longitude
         )
         try BalanceCalculator.applyTransactionBalances(
             store: store,
@@ -432,6 +519,84 @@ public final class ExpenseEngine {
 
     // MARK: - Deduplication, Cross-App Merging & Prompting
 
+    private func normalizedLocationName(_ text: String?) -> String? {
+        guard let text else { return nil }
+        let cleaned = text
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+        return cleaned.isEmpty ? nil : cleaned
+    }
+
+    private func extractMBAccountNumber(from text: String?) -> String? {
+        guard let text else { return nil }
+        let range = NSRange(text.startIndex..<text.endIndex, in: text)
+        guard let match = Self.mbAccountRegex.firstMatch(in: text, options: [], range: range) else {
+            return nil
+        }
+        let nsRange = match.range(withName: "acct")
+        guard nsRange.location != NSNotFound, let swiftRange = Range(nsRange, in: text) else {
+            return nil
+        }
+        return String(text[swiftRange]).uppercased()
+    }
+
+    private func reconcileSameBankSelfTransfer(
+        raw: RawNotification,
+        parsed: ParsedTransaction,
+        rawText: String
+    ) -> IngestResult? {
+        guard raw.sourceApp == .mbbank,
+              parsed.txType == .expense || parsed.txType == .income,
+              let incomingAcct = extractMBAccountNumber(from: rawText) else {
+            return nil
+        }
+
+        for existing in store.listTransactions() {
+            if existing.isManual { continue }
+            guard existing.sourceWalletId == .mbbank,
+                  existing.txType == .expense || existing.txType == .income,
+                  existing.direction != parsed.direction,
+                  existing.amount == parsed.amount else {
+                continue
+            }
+            if let existingRaw = existing.rawNotificationText,
+               existingRaw.contains(Self.crossAppMergeDelimiter) {
+                continue
+            }
+            let occurredDelta = abs(parsed.occurredAt.timeIntervalSince(existing.occurredAt))
+            let receivedDelta = abs(raw.receivedAt.timeIntervalSince(existing.createdAt))
+            guard min(occurredDelta, receivedDelta) <= Self.sameBankSelfTransferWindowSeconds else {
+                continue
+            }
+            guard let existingAcct = extractMBAccountNumber(from: existing.rawNotificationText),
+                  existingAcct != incomingAcct else {
+                continue
+            }
+
+            try? BalanceCalculator.reverseTransactionBalances(store: store, tx: existing)
+            var updated = existing
+            updated.txType = .internalTransfer
+            updated.sourceWalletId = .mbbank
+            updated.targetWalletId = .mbbank
+            updated.direction = .out
+            updated.status = .confirmed
+            updated.confirmedAt = raw.receivedAt
+            updated.description = "Chuyển giữa 2 TK MBBank"
+            updated.rawNotificationText = [existing.rawNotificationText, rawText]
+                .compactMap { $0 }
+                .filter { !$0.isEmpty }
+                .joined(separator: Self.crossAppMergeDelimiter)
+            store.saveTransaction(updated)
+
+            return IngestResult(
+                status: .duplicate,
+                transaction: updated,
+                reason: "Merged opposite-direction MBBank notifications across two own accounts into an internal self-transfer."
+            )
+        }
+        return nil
+    }
+
     private static func normalizedUpper(_ text: String) -> String {
         text
             .replacingOccurrences(of: "đ", with: "d")
@@ -475,24 +640,115 @@ public final class ExpenseEngine {
         raw: RawNotification,
         parsed: ParsedTransaction,
         rawText: String
-    ) -> Transaction? {
+    ) -> IngestResult? {
+        // Case A: Incoming MBBank MOMO-CASHIN arriving right after a MoMo bill payment
+        // expense of the exact same amount -> re-home the MoMo expense to MBBank
+        // instead of creating a fake internal transfer.
+        if parsed.txType == .internalTransfer,
+           parsed.sourceWalletId == .mbbank,
+           parsed.targetWalletId == .momo {
+            for existing in store.listTransactions() {
+                if existing.isManual { continue }
+                guard existing.txType == .expense,
+                      existing.direction == .out,
+                      existing.sourceWalletId == .momo,
+                      existing.amount == parsed.amount else {
+                    continue
+                }
+                if let existingRaw = existing.rawNotificationText,
+                   existingRaw.contains(Self.crossAppMergeDelimiter) {
+                    continue
+                }
+                guard isWithinCrossAppWindow(existing: existing, raw: raw, parsed: parsed) else {
+                    continue
+                }
+
+                try? BalanceCalculator.reverseTransactionBalances(store: store, tx: existing)
+                var updated = existing
+                updated.sourceWalletId = .mbbank
+                updated.targetWalletId = nil
+                if let traceId = parsed.traceId {
+                    updated.traceId = traceId
+                }
+                if let reportedBalance = parsed.reportedBalanceAfter {
+                    updated.reportedBalanceAfter = reportedBalance
+                }
+                updated.occurredAt = parsed.occurredAt
+                updated.rawNotificationText = [existing.rawNotificationText, rawText]
+                    .compactMap { $0 }
+                    .filter { !$0.isEmpty }
+                    .joined(separator: Self.crossAppMergeDelimiter)
+
+                try? BalanceCalculator.applyTransactionBalances(
+                    store: store,
+                    tx: updated,
+                    syncReportedBalance: syncMBBankReportedBalance
+                )
+                store.saveTransaction(updated)
+                return IngestResult(
+                    status: .duplicate,
+                    transaction: updated,
+                    reason: "Re-homed MoMo bill payment to MBBank from matching MOMO-CASHIN."
+                )
+            }
+            return nil
+        }
+
         guard parsed.txType == .expense, parsed.direction == .out else {
             return nil
         }
 
         for existing in store.listTransactions() {
             if existing.isManual { continue }
-            guard existing.txType == .expense,
-                  existing.direction == .out,
-                  existing.amount == parsed.amount,
-                  existing.sourceWalletId != parsed.sourceWalletId else {
-                continue
-            }
+            guard existing.amount == parsed.amount else { continue }
             if let existingRaw = existing.rawNotificationText,
                existingRaw.contains(Self.crossAppMergeDelimiter) {
                 continue
             }
             guard isWithinCrossAppWindow(existing: existing, raw: raw, parsed: parsed) else {
+                continue
+            }
+
+            // Case B: MBBank MOMO-CASHIN arrived first (silently logged as internal transfer),
+            // then MoMo bill payment expense arrived within 120s -> convert the internal
+            // transfer into a single MBBank expense with MoMo's merchant name and prompt user!
+            if parsed.sourceWalletId == .momo,
+               existing.txType == .internalTransfer,
+               existing.sourceWalletId == .mbbank,
+               existing.targetWalletId == .momo {
+                try? BalanceCalculator.reverseTransactionBalances(store: store, tx: existing)
+                var updated = existing
+                updated.txType = .expense
+                updated.sourceWalletId = .mbbank
+                updated.targetWalletId = nil
+                updated.direction = .out
+                updated.status = .pending
+                updated.confirmedAt = nil
+                if !parsed.description.isEmpty, parsed.description != "Không rõ nội dung" {
+                    updated.description = parsed.description
+                }
+                updated.rawNotificationText = [existing.rawNotificationText, rawText]
+                    .compactMap { $0 }
+                    .filter { !$0.isEmpty }
+                    .joined(separator: Self.crossAppMergeDelimiter)
+
+                try? BalanceCalculator.applyTransactionBalances(
+                    store: store,
+                    tx: updated,
+                    syncReportedBalance: syncMBBankReportedBalance
+                )
+                store.saveTransaction(updated)
+                return IngestResult(
+                    status: .created,
+                    transaction: updated,
+                    prompt: buildPrompt(for: updated),
+                    reason: "Converted MOMO-CASHIN internal transfer into MBBank expense using MoMo payment notification."
+                )
+            }
+
+            guard existing.txType == .expense,
+                  existing.direction == .out,
+                  existing.sourceWalletId != parsed.sourceWalletId else {
                 continue
             }
 
@@ -514,7 +770,11 @@ public final class ExpenseEngine {
                     .filter { !$0.isEmpty }
                     .joined(separator: Self.crossAppMergeDelimiter)
                 store.saveTransaction(updated)
-                return updated
+                return IngestResult(
+                    status: .duplicate,
+                    transaction: updated,
+                    reason: "Merged linked MoMo payment into existing MBBank expense."
+                )
             }
 
             // Order 2: MoMo arrived first, MBBank arrived second -> refund Ví MoMo,
@@ -552,7 +812,11 @@ public final class ExpenseEngine {
                     syncReportedBalance: syncMBBankReportedBalance
                 )
                 store.saveTransaction(updated)
-                return updated
+                return IngestResult(
+                    status: .duplicate,
+                    transaction: updated,
+                    reason: "Re-homed linked MoMo expense to MBBank."
+                )
             }
         }
 

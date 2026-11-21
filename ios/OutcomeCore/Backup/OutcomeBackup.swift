@@ -85,7 +85,7 @@ public enum OutcomeBackupCodec {
 
         // UTF-8 BOM ensures Vietnamese diacritics render cleanly in Microsoft Excel.
         var lines: [String] = [
-            "\u{FEFF}Ngày giờ,Ví nguồn,Ví đích,Loại,Hướng,Số tiền (VND),Nội dung,Tag,Ghi chú,Trạng thái,Mã Trace",
+            "\u{FEFF}Ngày giờ,Ví nguồn,Ví đích,Loại,Hướng,Số tiền (VND),Nội dung,Tag,Ghi chú,Vị trí,Trạng thái,Mã Trace",
         ]
 
         for tx in store.listTransactions() {
@@ -100,6 +100,7 @@ public enum OutcomeBackupCodec {
             }
             let dirLabel = tx.direction == .out ? "Chi" : "Thu"
             let tagName = tx.tagId.flatMap { tagsById[$0] } ?? ""
+            let locationLabel = tx.locationName ?? ""
             let statusLabel = tx.status == .confirmed ? "Đã duyệt" : "Chờ duyệt"
             let trace = tx.traceId ?? ""
 
@@ -113,6 +114,7 @@ public enum OutcomeBackupCodec {
                 tx.description,
                 tagName,
                 tx.note,
+                locationLabel,
                 statusLabel,
                 trace,
             ]

@@ -58,17 +58,25 @@ struct PendingInboxView: View {
 
                             VStack(spacing: 10) {
                                 ForEach(recentInternalTransfers) { tx in
-                                    TransactionRow(item: tx, tagName: nil)
-                                        .padding(14)
-                                        .background(
-                                            OutcomeTheme.Colors.card.opacity(0.75),
-                                            in: .rect(cornerRadius: OutcomeTheme.Layout.cardRadius)
-                                        )
-                                        .contextMenu {
-                                            Button("Xóa giao dịch", systemImage: "trash", role: .destructive) {
-                                                pendingDeletion = tx
-                                            }
+                                    Button {
+                                        coordinator.activeTaggingTransaction = tx
+                                    } label: {
+                                        TransactionRow(item: tx, tagName: nil)
+                                            .padding(14)
+                                            .background(
+                                                OutcomeTheme.Colors.card.opacity(0.75),
+                                                in: .rect(cornerRadius: OutcomeTheme.Layout.cardRadius)
+                                            )
+                                    }
+                                    .buttonStyle(.plain)
+                                    .contextMenu {
+                                        Button("Đổi thành Chi tiêu & gắn tag", systemImage: "tag") {
+                                            coordinator.activeTaggingTransaction = tx
                                         }
+                                        Button("Xóa giao dịch", systemImage: "trash", role: .destructive) {
+                                            pendingDeletion = tx
+                                        }
+                                    }
                                 }
                             }
                         }

@@ -107,6 +107,165 @@ class TestV11Features(unittest.TestCase):
         self.assertEqual(engine.store.get_wallet(WalletId.MOMO).balance, 500_000)
         self.assertEqual(engine.store.get_wallet(WalletId.MBBANK).balance, 1_750_000)
 
+    def test_convert_momo_cashin_internal_transfer_into_wifi_bill_expense(self) -> None:
+        engine = ExpenseEngine()
+        t0 = datetime(2026, 11, 21, 11, 30, 0)
+        engine.reconcile_balances(
+            {WalletId.MBBANK: 3_000_000, WalletId.MOMO: 200_000}, now=t0
+        )
+
+        # MBBank reports MOMO-CASHIN when paying WiFi bill on MoMo via linked MBBank
+        r_mb = engine.ingest_notification(
+            RawNotification(
+                source_app=WalletId.MBBANK,
+                title="Biến động số dư",
+                body=(
+                    "TK 0901234567|GD: -220,000VND 21/11/26 11:30|"
+                    "SD: 2,780,000VND| ND: MOMO-CASHIN - Ma giao dich/ Trace 900111"
+                ),
+                received_at=t0,
+            )
+        )
+        assert r_mb.transaction is not None
+        # Initially logged as internal transfer (+220k on MoMo, -220k on MBBank)
+        self.assertEqual(engine.store.get_wallet(WalletId.MBBANK).balance, 2_780_000)
+        self.assertEqual(engine.store.get_wallet(WalletId.MOMO).balance, 420_000)
+
+        # User taps internal transfer and tags it as "Hóa đơn" (WiFi)
+        converted = engine.update_transaction(
+            tx_id=r_mb.transaction.id,
+            wallet_id=WalletId.MBBANK,
+            direction=Direction.OUT,
+            amount=220_000,
+            tag_id="tag_hoa_don",
+            description="Bill WiFi FPT",
+            note="Tháng 11",
+            occurred_at=t0,
+        )
+        self.assertEqual(converted.target_wallet_id, None)
+        self.assertEqual(converted.tag_id, "tag_hoa_don")
+        # MoMo ghost balance is reverted cleanly back to 200k; MBBank stays 2,780k
+        self.assertEqual(engine.store.get_wallet(WalletId.MOMO).balance, 200_000)
+        self.assertEqual(engine.store.get_wallet(WalletId.MBBANK).balance, 2_780_000)
+        summary = engine.get_dashboard_summary(year=2026, month=11, now=t0)
+        self.assertEqual(summary.monthly_expense, 220_000)
+        self.assertEqual(summary.expense_by_tag["Hóa đơn"], 220_000)
+
+    def test_momo_cashin_plus_momo_bill_payment_auto_converts_both_orders(self) -> None:
+        # Order 1: MBBank MOMO-CASHIN arrives first, MoMo payment arrives 4s later
+        e1 = ExpenseEngine()
+        t0 = datetime(2026, 11, 21, 14, 0, 0)
+        e1.reconcile_balances({WalletId.MBBANK: 2_000_000, WalletId.MOMO: 100_000}, now=t0)
+        e1.ingest_notification(
+            RawNotification(
+                source_app=WalletId.MBBANK,
+                title="Biến động số dư",
+                body=(
+                    "TK 0901234567|GD: -220,000VND 21/11/26 14:00|"
+                    "SD: 1,780,000VND| ND: MOMO-CASHIN - Ma giao dich/ Trace 900222"
+                ),
+                received_at=t0 + timedelta(seconds=1),
+            )
+        )
+        r_momo = e1.ingest_notification(
+            RawNotification(
+                source_app=WalletId.MOMO,
+                title="Thanh toán thành công",
+                body="Bạn đã thanh toán thành công 220.000đ cho dịch vụ FPT Telecom.",
+                received_at=t0 + timedelta(seconds=5),
+            )
+        )
+        self.assertEqual(r_momo.status, "CREATED")
+        assert r_momo.prompt is not None and r_momo.prompt.should_prompt
+        self.assertEqual(len(e1.store.list_transactions()), 1)
+        self.assertEqual(e1.store.get_wallet(WalletId.MBBANK).balance, 1_780_000)
+        self.assertEqual(e1.store.get_wallet(WalletId.MOMO).balance, 100_000)
+        self.assertEqual(e1.store.list_transactions()[0].description, "FPT Telecom")
+
+        # Order 2: MoMo payment arrives first, MBBank MOMO-CASHIN arrives 5s later
+        e2 = ExpenseEngine()
+        e2.reconcile_balances({WalletId.MBBANK: 2_000_000, WalletId.MOMO: 100_000}, now=t0)
+        e2.ingest_notification(
+            RawNotification(
+                source_app=WalletId.MOMO,
+                title="Thanh toán thành công",
+                body="Bạn đã thanh toán thành công 220.000đ cho dịch vụ FPT Telecom.",
+                received_at=t0 + timedelta(seconds=2),
+            )
+        )
+        r_mb = e2.ingest_notification(
+            RawNotification(
+                source_app=WalletId.MBBANK,
+                title="Biến động số dư",
+                body=(
+                    "TK 0901234567|GD: -220,000VND 21/11/26 14:00|"
+                    "SD: 1,780,000VND| ND: MOMO-CASHIN - Ma giao dich/ Trace 900333"
+                ),
+                received_at=t0 + timedelta(seconds=7),
+            )
+        )
+        self.assertEqual(r_mb.status, "DUPLICATE")
+        self.assertEqual(len(e2.store.list_transactions()), 1)
+        self.assertEqual(e2.store.get_wallet(WalletId.MBBANK).balance, 1_780_000)
+        self.assertEqual(e2.store.get_wallet(WalletId.MOMO).balance, 100_000)
+        self.assertEqual(e2.store.list_transactions()[0].source_wallet_id, WalletId.MBBANK)
+        self.assertEqual(e2.store.list_transactions()[0].description, "FPT Telecom")
+
+    def test_mbbank_two_account_self_transfer_and_sd_discrepancy(self) -> None:
+        engine = ExpenseEngine()
+        t0 = datetime(2026, 11, 21, 15, 0, 0)
+        engine.reconcile_balances({WalletId.MBBANK: 5_000_000, WalletId.MOMO: 200_000}, now=t0)
+
+        # #7) User transfers 1,000,000 between own TK A and TK B on MBBank
+        engine.ingest_notification(
+            RawNotification(
+                source_app=WalletId.MBBANK,
+                title="Biến động số dư",
+                body="TK 0901234567|GD: -1,000,000VND 21/11/26 15:05|SD: 4,000,000VND| ND: Chuyen sang TK phu - Trace 101010",
+                received_at=t0 + timedelta(minutes=5),
+            )
+        )
+        r2 = engine.ingest_notification(
+            RawNotification(
+                source_app=WalletId.MBBANK,
+                title="Biến động số dư",
+                body="TK 88886666|GD: +1,000,000VND 21/11/26 15:05|SD: 1,000,000VND| ND: Nhan tu TK chinh - Trace 101011",
+                received_at=t0 + timedelta(minutes=5, seconds=4),
+            )
+        )
+        self.assertEqual(r2.status, "DUPLICATE")
+        self.assertEqual(len(engine.store.list_transactions()), 1)
+        self.assertEqual(engine.store.get_wallet(WalletId.MBBANK).balance, 5_000_000)
+        summary = engine.get_dashboard_summary(year=2026, month=11, now=t0)
+        self.assertEqual(summary.monthly_expense, 0)
+        self.assertEqual(summary.monthly_income, 0)
+
+        # #9) Missed notification causes MBBank SD: discrepancy -> detected immediately
+        engine.ingest_notification(
+            RawNotification(
+                source_app=WalletId.MBBANK,
+                title="Biến động số dư",
+                body="TK 0901234567|GD: -50,000VND 21/11/26 16:00|SD: 4,850,000VND| ND: Cafe - Trace 202020",
+                received_at=t0 + timedelta(hours=1),
+                location_name="Đường Nguyễn Huệ, Q.1",
+                latitude=10.7745,
+                longitude=106.7035,
+            )
+        )
+        discrepancy = engine.detect_mbbank_discrepancy()
+        assert discrepancy is not None
+        self.assertEqual(discrepancy.reported_balance, 4_850_000)
+        self.assertEqual(discrepancy.app_balance, 4_950_000)
+        self.assertEqual(discrepancy.delta, -100_000)
+        self.assertEqual(engine.store.list_transactions()[0].location_name, "Đường Nguyễn Huệ, Q.1")
+
+        # After reconciling -> discrepancy clears
+        engine.reconcile_balances(
+            {WalletId.MBBANK: 4_850_000, WalletId.MOMO: 200_000},
+            now=t0 + timedelta(hours=1, minutes=5),
+        )
+        self.assertIsNone(engine.detect_mbbank_discrepancy())
+
 
 if __name__ == "__main__":
     unittest.main()

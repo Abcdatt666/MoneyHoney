@@ -3,22 +3,27 @@ import Foundation
 /// Notification parser for MBBank and MoMo push notifications.
 public enum NotificationParser {
     private static let mbGdRegex = try! NSRegularExpression(
-        pattern: #"GD\s*:\s*(?<sign>[+-])\s*(?<num>\d{1,3}(?:[.,]\d{3})+|\d+)\s*(?:VND|VNĐ|Đ|D)?(?:\s+(?<dt>\d{2}/\d{2}/\d{2,4}\s+\d{2}:\d{2}(?::\d{2})?))?"#,
+        pattern: #"GD\s*:\s*(?<sign>[+-])\s*(?<num>\d{1,3}(?:[.,]\d{3})+|\d+)(?:[.,]\d{2})?\s*(?:VND|VNĐ|Đ|D)?(?:\s+(?<dt>\d{2}/\d{2}/\d{2,4}\s+\d{2}:\d{2}(?::\d{2})?))?"#,
         options: [.caseInsensitive]
     )
 
     private static let signedAmountRegex = try! NSRegularExpression(
-        pattern: #"(?<sign>[+-])\s*(?<num>\d{1,3}(?:[.,]\d{3})+|\d+)\s*(?:VND|VNĐ|Đ|D)?"#,
+        pattern: #"(?<![\d/\-])(?<sign>[+-])\s*(?<num>\d{1,3}(?:[.,]\d{3})+|\d+)(?:[.,]\d{2})?\s*(?:VND|VNĐ|đ|Đ)?(?![\d/\-])"#,
         options: [.caseInsensitive]
     )
 
     private static let currencyAmountRegex = try! NSRegularExpression(
-        pattern: #"(?<!\d)(?<num>\d{1,3}(?:[.,]\d{3})+|\d+)\s*(?:VND|VNĐ|đ|Đ)(?=\s|[.,;:!?\)\"]|$)"#,
+        pattern: #"(?<!\d)(?<num>\d{1,3}(?:[.,]\d{3})+|\d+)(?:[.,]\d{2})?\s*(?:VND|VNĐ|đ|Đ)(?=\s|[.,;:!?\)\"]|$)"#,
+        options: [.caseInsensitive]
+    )
+
+    private static let prefixCurrencyAmountRegex = try! NSRegularExpression(
+        pattern: #"\b(?:VND|VNĐ)\s*(?<num>\d{1,3}(?:[.,]\d{3})+|\d+)(?:[.,]\d{2})?(?!\d)"#,
         options: [.caseInsensitive]
     )
 
     private static let balanceRegex = try! NSRegularExpression(
-        pattern: #"(?:SD|SO\s*DU|SỐ\s*DƯ)\s*[:\-]?\s*(?<num>\d{1,3}(?:[.,]\d{3})+|\d+)\s*(?:VND|VNĐ|Đ|D)?"#,
+        pattern: #"(?:SD|SO\s*DU|SỐ\s*DƯ)(?:\s+(?:KHA\s*DUNG|KHẢ\s*DỤNG|HIEN\s*TAI|HIỆN\s*TẠI|CON\s*LAI|CÒN\s*LẠI))?\s*[:\-]?\s*(?:(?:VND|VNĐ)\s*)?(?<num>\d{1,3}(?:[.,]\d{3})+|\d+)(?:[.,]\d{2})?\s*(?:VND|VNĐ|Đ|D)?"#,
         options: [.caseInsensitive]
     )
 
@@ -29,6 +34,16 @@ public enum NotificationParser {
 
     private static let traceRegex = try! NSRegularExpression(
         pattern: #"(?:-\s*)?(?:M[aã]\s+giao\s+d[iị]ch\s*/\s*Trace|Trace)\s*[:#]?\s*(?<trace>[A-Z0-9]+)\b"#,
+        options: [.caseInsensitive]
+    )
+
+    private static let momoCashInRegex = try! NSRegularExpression(
+        pattern: #"MOMO[\s_\-]?CASHIN"#,
+        options: [.caseInsensitive]
+    )
+
+    private static let momoCashOutRegex = try! NSRegularExpression(
+        pattern: #"MOMO[\s_\-]?CASHOUT"#,
         options: [.caseInsensitive]
     )
 
@@ -79,6 +94,18 @@ public enum NotificationParser {
         "CAP NHAT UNG DUNG",
         "MA OTP",
         "OTP",
+        // Credit card statements, debt reminders, savings books, and MoMo Postpaid
+        "SAO KE",
+        "DU NO",
+        "HAN CHOT THANH TOAN",
+        "VUI LONG THANH TOAN",
+        "DEN HAN THANH TOAN",
+        "THANH TOAN TOI THIEU",
+        "PHAT SINH PHI TRE HAN",
+        "THE TIN DUNG",
+        "SO TIET KIEM",
+        "TIET KIEM SO",
+        "VI TRA SAU",
     ]
 
     private static let inPhrases: [String] = [
@@ -91,9 +118,9 @@ public enum NotificationParser {
         "HOAN TIEN",
         "DUOC HOAN",
         "HOAN LAI",
-        "TIEN LOI",
         "NAP TIEN VAO VI",
         "VAO VI MOMO",
+        "VE VI MOMO",
         "NAP VAO VI",
     ]
 
@@ -103,6 +130,10 @@ public enum NotificationParser {
         "CHUYEN KHOAN",
         "DA CHUYEN",
         "TRU TIEN",
+        "BI TRU",
+        "TRU PHI",
+        "PHI DUY TRI",
+        "PHI THUONG NIEN",
         "RUT TIEN",
         "DA RUT",
         "MUA THE",
@@ -110,6 +141,7 @@ public enum NotificationParser {
         "NAP TIEN DIEN THOAI",
         "NAP DATA",
         "NAP 4G",
+        "TICH LUY",
         "CHUYEN DEN",
         "GUI DEN",
     ]
@@ -124,10 +156,52 @@ public enum NotificationParser {
         let combinedForMatching = replacingMatches(of: momoMessageRegex, in: combined, with: "")
             .trimmingCharacters(in: .whitespacesAndNewlines)
         let upperAscii = stripVietnameseAccents(combinedForMatching).uppercased()
-        let combinedWithoutBalance = replacingMatches(of: balanceRegex, in: combinedForMatching, with: " ")
 
-        if promoKeywords.contains(where: { upperAscii.contains($0) }),
-           firstMatch(of: signedAmountRegex, in: combinedWithoutBalance) == nil {
+        // Only a genuine checking-account movement ("GD: +/-[amount]") may bypass
+        // promotional / statement / credit-card / postpaid reminder filters.
+        let hasExplicitCheckingGd = firstMatch(of: mbGdRegex, in: combinedForMatching) != nil
+        if promoKeywords.contains(where: { upperAscii.contains($0) }), !hasExplicitCheckingGd {
+            return nil
+        }
+
+        // Dedicated Túi Thần Tài handling for MoMo main wallet accuracy:
+        // - Daily interest accrues inside Túi Thần Tài (NOT main Ví MoMo cash balance) -> ignore.
+        // - Withdraw from Túi Thần Tài back to Ví MoMo -> INCOME on Ví MoMo.
+        // - Deposit / Auto-save from Ví MoMo into Túi Thần Tài -> EXPENSE on Ví MoMo.
+        if raw.sourceApp == .momo, upperAscii.contains("TUI THAN TAI") {
+            if upperAscii.contains("TIEN LOI") || upperAscii.contains("LAI SUAT") {
+                return nil
+            }
+            let textNoSd = replacingMatches(of: balanceRegex, in: combinedForMatching, with: " ")
+            guard let amount = extractFirstCurrencyAmount(in: textNoSd) else {
+                return nil
+            }
+            if upperAscii.contains("VE VI MOMO") || (upperAscii.contains("RUT") && upperAscii.contains("TU TUI THAN TAI")) {
+                return ParsedTransaction(
+                    txType: .income,
+                    sourceWalletId: .momo,
+                    targetWalletId: nil,
+                    amount: amount,
+                    direction: .in,
+                    description: "Rút Túi Thần Tài",
+                    traceId: extractTraceId(from: combined),
+                    reportedBalanceAfter: extractReportedBalance(from: combined),
+                    occurredAt: raw.receivedAt
+                )
+            }
+            if upperAscii.contains("VAO TUI THAN TAI") || upperAscii.contains("TICH LUY") {
+                return ParsedTransaction(
+                    txType: .expense,
+                    sourceWalletId: .momo,
+                    targetWalletId: nil,
+                    amount: amount,
+                    direction: .out,
+                    description: "Nạp Túi Thần Tài",
+                    traceId: extractTraceId(from: combined),
+                    reportedBalanceAfter: extractReportedBalance(from: combined),
+                    occurredAt: raw.receivedAt
+                )
+            }
             return nil
         }
 
@@ -140,7 +214,7 @@ public enum NotificationParser {
         let description = extractDescription(rawTitle: raw.title, rawBody: raw.body)
 
         if raw.sourceApp == .mbbank {
-            if upperAscii.contains("MOMO-CASHIN"), extracted.direction == .out {
+            if firstMatch(of: momoCashInRegex, in: upperAscii) != nil, extracted.direction == .out {
                 return ParsedTransaction(
                     txType: .internalTransfer,
                     sourceWalletId: .mbbank,
@@ -153,7 +227,7 @@ public enum NotificationParser {
                     occurredAt: extracted.occurredAt
                 )
             }
-            if upperAscii.contains("MOMO-CASHOUT"), extracted.direction == .in {
+            if firstMatch(of: momoCashOutRegex, in: upperAscii) != nil, extracted.direction == .in {
                 return ParsedTransaction(
                     txType: .internalTransfer,
                     sourceWalletId: .momo,
@@ -213,6 +287,20 @@ public enum NotificationParser {
         return fallback
     }
 
+    private static func extractFirstCurrencyAmount(in text: String) -> Int? {
+        if let suffix = firstMatch(of: currencyAmountRegex, in: text),
+           let numStr = capturedGroup("num", in: suffix, text: text),
+           let amount = parseVndInt(numStr), amount > 0 {
+            return amount
+        }
+        if let prefix = firstMatch(of: prefixCurrencyAmountRegex, in: text),
+           let numStr = capturedGroup("num", in: prefix, text: text),
+           let amount = parseVndInt(numStr), amount > 0 {
+            return amount
+        }
+        return nil
+    }
+
     private static func extractAmountDirectionAndTime(
         from text: String,
         fallbackDate: Date
@@ -237,9 +325,7 @@ public enum NotificationParser {
         }
 
         let upperAscii = stripVietnameseAccents(textNoSd).uppercased()
-        if let currency = firstMatch(of: currencyAmountRegex, in: textNoSd),
-           let numStr = capturedGroup("num", in: currency, text: textNoSd),
-           let amount = parseVndInt(numStr), amount > 0 {
+        if let amount = extractFirstCurrencyAmount(in: textNoSd) {
             if inPhrases.contains(where: { upperAscii.contains($0) }) {
                 return (amount, .in, fallbackDate)
             }
@@ -281,8 +367,8 @@ public enum NotificationParser {
         let combined = "\(rawTitle)\n\(rawBody)".trimmingCharacters(in: .whitespacesAndNewlines)
         let upperAscii = stripVietnameseAccents(combined).uppercased()
 
-        if upperAscii.contains("MOMO-CASHIN") { return "MOMO-CASHIN" }
-        if upperAscii.contains("MOMO-CASHOUT") { return "MOMO-CASHOUT" }
+        if firstMatch(of: momoCashInRegex, in: upperAscii) != nil { return "MOMO-CASHIN" }
+        if firstMatch(of: momoCashOutRegex, in: upperAscii) != nil { return "MOMO-CASHOUT" }
 
         let trimChars = CharacterSet.whitespacesAndNewlines.union(CharacterSet(charactersIn: ".:-|"))
         let simpleTrim = CharacterSet.whitespacesAndNewlines.union(CharacterSet(charactersIn: ".:-"))
@@ -294,10 +380,6 @@ public enum NotificationParser {
             if !cleaned.isEmpty {
                 return cleaned
             }
-        }
-
-        if upperAscii.contains("TUI THAN TAI") {
-            return "Tiền lời Túi Thần Tài"
         }
 
         if let refundMatch = firstMatch(of: momoRefundRegex, in: rawBody),
@@ -349,6 +431,7 @@ public enum NotificationParser {
         cleaned = replacingMatches(of: traceRegex, in: cleaned, with: " ")
         cleaned = replacingMatches(of: signedAmountRegex, in: cleaned, with: " ")
         cleaned = replacingMatches(of: currencyAmountRegex, in: cleaned, with: " ")
+        cleaned = replacingMatches(of: prefixCurrencyAmountRegex, in: cleaned, with: " ")
         cleaned = cleaned
             .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
             .trimmingCharacters(in: trimChars)

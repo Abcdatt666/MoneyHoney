@@ -6,6 +6,7 @@ struct TagAssignmentSheet: View {
         case note
         case amount
         case description
+        case location
     }
 
     @Environment(AppCoordinator.self) private var coordinator
@@ -21,6 +22,9 @@ struct TagAssignmentSheet: View {
     @State private var amountText: String
     @State private var descriptionText: String
     @State private var occurredAt: Date
+    @State private var locationNameText: String
+    @State private var latitude: Double?
+    @State private var longitude: Double?
     @State private var isEditingDetails: Bool = false
     @State private var didSeedSuggestion: Bool = false
 
@@ -34,10 +38,22 @@ struct TagAssignmentSheet: View {
         _selectedTagId = State(initialValue: item.tagId)
         _note = State(initialValue: item.note)
         _walletId = State(initialValue: item.sourceWalletId)
-        _direction = State(initialValue: item.direction)
+        _direction = State(
+            initialValue: item.txType == .internalTransfer && item.sourceWalletId == .mbbank
+                ? .out
+                : item.direction
+        )
         _amountText = State(initialValue: String(item.amount))
         _descriptionText = State(initialValue: item.description)
         _occurredAt = State(initialValue: item.occurredAt)
+        _locationNameText = State(initialValue: item.locationName ?? "")
+        _latitude = State(initialValue: item.latitude)
+        _longitude = State(initialValue: item.longitude)
+    }
+
+    private var hasLocation: Bool {
+        let trimmedLoc = locationNameText.trimmingCharacters(in: .whitespacesAndNewlines)
+        return !trimmedLoc.isEmpty || (latitude != nil && longitude != nil)
     }
 
     private var parsedAmount: Int? {
@@ -50,12 +66,22 @@ struct TagAssignmentSheet: View {
         coordinator.suggestTags(for: item, limit: 3)
     }
 
+    private var isConvertingInternalTransfer: Bool {
+        item.txType == .internalTransfer
+    }
+
     private var hasDetailChanges: Bool {
-        walletId != item.sourceWalletId ||
+        let trimmedLoc = locationNameText.trimmingCharacters(in: .whitespacesAndNewlines)
+        let originalLoc = item.locationName ?? ""
+        return isConvertingInternalTransfer ||
+            walletId != item.sourceWalletId ||
             direction != item.direction ||
             parsedAmount != item.amount ||
             descriptionText.trimmingCharacters(in: .whitespacesAndNewlines) != item.description ||
-            abs(occurredAt.timeIntervalSince(item.occurredAt)) >= 1
+            abs(occurredAt.timeIntervalSince(item.occurredAt)) >= 1 ||
+            trimmedLoc != originalLoc ||
+            latitude != item.latitude ||
+            longitude != item.longitude
     }
 
     private var canSave: Bool {
@@ -67,6 +93,10 @@ struct TagAssignmentSheet: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 16) {
                     summaryCard
+
+                    if isConvertingInternalTransfer {
+                        internalTransferConvertNotice
+                    }
 
                     if !suggestedTags.isEmpty {
                         suggestedTagsSection
@@ -106,6 +136,14 @@ struct TagAssignmentSheet: View {
                                 OutcomeTheme.Colors.card,
                                 in: .rect(cornerRadius: OutcomeTheme.Layout.chipRadius)
                             )
+                    }
+
+                    if hasLocation {
+                        TransactionLocationCard(
+                            locationName: locationNameText.trimmingCharacters(in: .whitespacesAndNewlines),
+                            latitude: latitude,
+                            longitude: longitude
+                        )
                     }
 
                     editDetailsSection
@@ -148,7 +186,11 @@ struct TagAssignmentSheet: View {
                 }
             }
             .background(OutcomeTheme.Colors.canvas)
-            .navigationTitle(item.status == .pending ? "Chọn danh mục" : "Chi tiết giao dịch")
+            .navigationTitle(
+                isConvertingInternalTransfer
+                    ? "Đổi thành chi tiêu"
+                    : (item.status == .pending ? "Chọn danh mục" : "Chi tiết giao dịch")
+            )
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
@@ -210,6 +252,28 @@ struct TagAssignmentSheet: View {
         .padding(16)
         .frame(maxWidth: .infinity)
         .background(OutcomeTheme.Colors.card, in: .rect(cornerRadius: OutcomeTheme.Layout.tileRadius))
+    }
+
+    private var internalTransferConvertNotice: some View {
+        HStack(alignment: .top, spacing: 10) {
+            Image(systemName: "arrow.left.arrow.right.circle.fill")
+                .font(.title3)
+                .foregroundStyle(OutcomeTheme.Colors.accent)
+                .accessibilityHidden(true)
+
+            VStack(alignment: .leading, spacing: 3) {
+                Text("Chuyển nội bộ → Chi tiêu / Thu nhập")
+                    .font(.footnote.bold())
+                    .foregroundStyle(.primary)
+
+                Text("Chọn tag và bấm Lưu để tính vào chi tiêu tháng (ví dụ: bill WiFi trả qua MoMo bằng nguồn MBBank). Số dư đã cộng sang Ví MoMo sẽ tự động được hoàn lại.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .padding(14)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(OutcomeTheme.Colors.card, in: .rect(cornerRadius: OutcomeTheme.Layout.chipRadius))
     }
 
     private var suggestedTagsSection: some View {
@@ -331,6 +395,33 @@ struct TagAssignmentSheet: View {
                     displayedComponents: [.date, .hourAndMinute]
                 )
                 .font(.subheadline)
+
+                VStack(alignment: .leading, spacing: 6) {
+                    HStack {
+                        Text("Vị trí")
+                            .font(.footnote.bold())
+                            .foregroundStyle(.secondary)
+
+                        Spacer()
+
+                        if hasLocation {
+                            Button("Gỡ vị trí", role: .destructive) {
+                                locationNameText = ""
+                                latitude = nil
+                                longitude = nil
+                            }
+                            .font(.footnote.bold())
+                        }
+                    }
+
+                    TextField("Tên địa điểm (tùy chọn)", text: $locationNameText)
+                        .focused($focusedField, equals: .location)
+                        .submitLabel(.done)
+                        .onSubmit { focusedField = nil }
+                        .padding(12)
+                        .frame(minHeight: OutcomeTheme.Layout.minTouchTarget)
+                        .background(OutcomeTheme.Colors.track, in: .rect(cornerRadius: 12))
+                }
             }
             .padding(.top, 12)
         } label: {
@@ -350,6 +441,8 @@ struct TagAssignmentSheet: View {
         saveTrigger += 1
 
         if hasDetailChanges {
+            let trimmedLocation = locationNameText.trimmingCharacters(in: .whitespacesAndNewlines)
+            let shouldClearLocation = trimmedLocation.isEmpty && latitude == nil && longitude == nil
             coordinator.updateTransaction(
                 txId: item.id,
                 walletId: walletId,
@@ -358,7 +451,11 @@ struct TagAssignmentSheet: View {
                 tagId: tagId,
                 description: descriptionText,
                 note: note,
-                occurredAt: occurredAt
+                occurredAt: occurredAt,
+                locationName: trimmedLocation.isEmpty ? nil : trimmedLocation,
+                latitude: latitude,
+                longitude: longitude,
+                clearLocation: shouldClearLocation
             )
         } else {
             coordinator.confirmTransaction(

@@ -18,6 +18,8 @@ struct ManualEntrySheet: View {
     @State private var selectedTagId: String? = "tag_an_uong"
     @State private var descriptionText: String = ""
     @State private var noteText: String = ""
+    @State private var locationManager = LocationCaptureManager()
+    @State private var capturedLocation: CapturedLocation?
     @State private var isShowingNewTagAlert: Bool = false
     @State private var newTagName: String = ""
     @State private var saveTrigger: Int = 0
@@ -138,6 +140,8 @@ struct ManualEntrySheet: View {
                                 OutcomeTheme.Colors.card,
                                 in: .rect(cornerRadius: OutcomeTheme.Layout.chipRadius)
                             )
+
+                        locationAttachRow
                     }
                 }
                 .padding(.horizontal, OutcomeTheme.Layout.horizontalPadding)
@@ -174,7 +178,10 @@ struct ManualEntrySheet: View {
                             amount: amount,
                             tagId: tagId,
                             description: descriptionText,
-                            note: noteText
+                            note: noteText,
+                            locationName: capturedLocation?.name,
+                            latitude: capturedLocation?.latitude,
+                            longitude: capturedLocation?.longitude
                         )
                         dismiss()
                     }
@@ -195,6 +202,85 @@ struct ManualEntrySheet: View {
         .presentationBackground(OutcomeTheme.Colors.canvas)
         .presentationDetents([.large])
         .presentationDragIndicator(.visible)
+    }
+
+    @ViewBuilder
+    private var locationAttachRow: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            if let capturedLocation {
+                HStack(spacing: 8) {
+                    Image(systemName: "mappin.and.ellipse")
+                        .font(.footnote.bold())
+                        .foregroundStyle(OutcomeTheme.Colors.accent)
+                        .accessibilityHidden(true)
+
+                    Text(capturedLocation.name)
+                        .font(.footnote)
+                        .foregroundStyle(.primary)
+                        .lineLimit(1)
+
+                    Spacer()
+
+                    Button("Gỡ vị trí", systemImage: "xmark.circle.fill") {
+                        self.capturedLocation = nil
+                    }
+                    .labelStyle(.iconOnly)
+                    .foregroundStyle(.secondary)
+                    .frame(
+                        minWidth: OutcomeTheme.Layout.minTouchTarget,
+                        minHeight: OutcomeTheme.Layout.minTouchTarget
+                    )
+                }
+                .padding(.horizontal, 14)
+                .frame(minHeight: OutcomeTheme.Layout.minTouchTarget)
+                .background(
+                    OutcomeTheme.Colors.card,
+                    in: .rect(cornerRadius: OutcomeTheme.Layout.chipRadius)
+                )
+            } else {
+                Button {
+                    focusedField = nil
+                    Task {
+                        if let loc = await locationManager.captureCurrentLocation() {
+                            capturedLocation = loc
+                        }
+                    }
+                } label: {
+                    HStack(spacing: 8) {
+                        if locationManager.isCapturing {
+                            ProgressView()
+                                .controlSize(.small)
+                        } else {
+                            Image(systemName: "location")
+                                .font(.footnote.bold())
+                                .foregroundStyle(OutcomeTheme.Colors.accent)
+                                .accessibilityHidden(true)
+                        }
+
+                        Text(locationManager.isCapturing ? "Đang lấy vị trí…" : "Gắn vị trí hiện tại (tùy chọn)")
+                            .font(.footnote.weight(.medium))
+                            .foregroundStyle(.secondary)
+
+                        Spacer()
+                    }
+                    .padding(.horizontal, 14)
+                    .frame(minHeight: OutcomeTheme.Layout.minTouchTarget)
+                    .background(
+                        OutcomeTheme.Colors.card,
+                        in: .rect(cornerRadius: OutcomeTheme.Layout.chipRadius)
+                    )
+                }
+                .buttonStyle(.plain)
+                .disabled(locationManager.isCapturing)
+            }
+
+            if let error = locationManager.errorMessage {
+                Text(error)
+                    .font(.caption)
+                    .foregroundStyle(OutcomeTheme.Colors.discrepancy)
+                    .padding(.horizontal, 4)
+            }
+        }
     }
 }
 

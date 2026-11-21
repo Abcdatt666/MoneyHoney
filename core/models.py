@@ -93,6 +93,9 @@ class Transaction:
     raw_notification_text: Optional[str] = None
     reported_balance_after: Optional[int] = None
     confirmed_at: Optional[datetime] = None
+    location_name: Optional[str] = None
+    latitude: Optional[float] = None
+    longitude: Optional[float] = None
 
 
 @dataclass
@@ -116,6 +119,9 @@ class RawNotification:
     title: str
     body: str
     received_at: datetime = field(default_factory=datetime.now)
+    location_name: Optional[str] = None
+    latitude: Optional[float] = None
+    longitude: Optional[float] = None
 
 
 @dataclass(frozen=True)

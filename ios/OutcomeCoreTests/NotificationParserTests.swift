@@ -129,15 +129,38 @@ final class NotificationParserTests: XCTestCase {
         XCTAssertEqual(r4.amount, 50_000)
         XCTAssertEqual(r4.description, "Hoàn tiền - Shopee")
 
-        let r5 = try XCTUnwrap(NotificationParser.parse(RawNotification(
+        // 5) Tiền lời Túi Thần Tài -> ignored (does not enter main Ví MoMo cash balance)
+        let r5 = NotificationParser.parse(RawNotification(
             sourceApp: .momo,
             title: "Tiền lời Túi Thần Tài",
             body: "Chúc mừng bạn nhận được 1.250đ tiền lời hôm nay từ Túi Thần Tài.",
             receivedAt: ts
+        ))
+        XCTAssertNil(r5)
+
+        // 5b) Rút tiền từ Túi Thần Tài về Ví MoMo -> INCOME on Ví MoMo
+        let r5b = try XCTUnwrap(NotificationParser.parse(RawNotification(
+            sourceApp: .momo,
+            title: "Túi Thần Tài",
+            body: "Giao dịch rút 500.000đ từ Túi Thần Tài về Ví MoMo thành công.",
+            receivedAt: ts
         )))
-        XCTAssertEqual(r5.txType, .income)
-        XCTAssertEqual(r5.amount, 1_250)
-        XCTAssertEqual(r5.description, "Tiền lời Túi Thần Tài")
+        XCTAssertEqual(r5b.txType, .income)
+        XCTAssertEqual(r5b.direction, .in)
+        XCTAssertEqual(r5b.amount, 500_000)
+        XCTAssertEqual(r5b.description, "Rút Túi Thần Tài")
+
+        // 5c) Tự động tích lũy vào Túi Thần Tài -> EXPENSE from Ví MoMo
+        let r5c = try XCTUnwrap(NotificationParser.parse(RawNotification(
+            sourceApp: .momo,
+            title: "Túi Thần Tài",
+            body: "[Túi Thần Tài] Hệ thống đã tự động tích lũy 300.000đ từ Ví MoMo của bạn.",
+            receivedAt: ts
+        )))
+        XCTAssertEqual(r5c.txType, .expense)
+        XCTAssertEqual(r5c.direction, .out)
+        XCTAssertEqual(r5c.amount, 300_000)
+        XCTAssertEqual(r5c.description, "Nạp Túi Thần Tài")
 
         let r6 = try XCTUnwrap(NotificationParser.parse(RawNotification(
             sourceApp: .momo,
@@ -202,5 +225,72 @@ final class NotificationParserTests: XCTestCase {
         XCTAssertNil(NotificationParser.parse(promo))
         XCTAssertNil(NotificationParser.parse(giftCardPromo))
         XCTAssertNil(NotificationParser.parse(otp))
+    }
+
+    func testHardenedBankAndMoMoEdgeCases() throws {
+        // #1 Credit card statement, credit card spend, savings book -> ignored
+        XCTAssertNil(NotificationParser.parse(RawNotification(
+            sourceApp: .mbbank,
+            title: "Thông báo sao kê",
+            body: "Thong bao sao ke the tin dung thang 11/2026. Tong du no: VND 5,200,000. Vui long thanh toan truoc ngay 25-11-2026.",
+            receivedAt: ts
+        )))
+        XCTAssertNil(NotificationParser.parse(RawNotification(
+            sourceApp: .mbbank,
+            title: "Biến động thẻ",
+            body: "The tin dung VISA 4084xxxxxx phat sinh giao dich chi tieu VND 1,500,000 tai THE COFFEE HOUSE. So du kha dung: VND 18,500,000.",
+            receivedAt: ts
+        )))
+        XCTAssertNil(NotificationParser.parse(RawNotification(
+            sourceApp: .mbbank,
+            title: "Tiết kiệm số",
+            body: "Quy khach da mo thanh cong So tiet kiem so 0123xxxxxx so tien 50,000,000 VND.",
+            receivedAt: ts
+        )))
+
+        // #2 MoMo Ví Trả Sau reminder & postpaid payment -> ignored
+        XCTAssertNil(NotificationParser.parse(RawNotification(
+            sourceApp: .momo,
+            title: "Nhắc thanh toán Ví Trả Sau",
+            body: "Toàn bộ dư nợ Ví Trả Sau của bạn là 1.850.000đ. Vui lòng thanh toán trước ngày 05/12.",
+            receivedAt: ts
+        )))
+        XCTAssertNil(NotificationParser.parse(RawNotification(
+            sourceApp: .momo,
+            title: "Thanh toán thành công",
+            body: "Thanh toán thành công 150.000đ cho Shopee bằng nguồn Ví Trả Sau.",
+            receivedAt: ts
+        )))
+
+        // #4 MOMO_CASHIN variant
+        let cashIn = try XCTUnwrap(NotificationParser.parse(RawNotification(
+            sourceApp: .mbbank,
+            title: "Biến động số dư",
+            body: "TK 0901234567|GD: -200,000VND 21/11/26 10:00|SD: 5,000,000VND| ND: MOMO_CASHIN 0901234567",
+            receivedAt: ts
+        )))
+        XCTAssertEqual(cashIn.txType, .internalTransfer)
+        XCTAssertEqual(cashIn.amount, 200_000)
+
+        // #5 & #6 Prefix VND + extended "So du kha dung:" stripping
+        let feeTx = try XCTUnwrap(NotificationParser.parse(RawNotification(
+            sourceApp: .mbbank,
+            title: "Thông báo thu phí",
+            body: "Giao dich tru phi thuong nien the 9704xxxxxx so tien VND 99,000. So du kha dung: VND 1,450,000.",
+            receivedAt: ts
+        )))
+        XCTAssertEqual(feeTx.txType, .expense)
+        XCTAssertEqual(feeTx.amount, 99_000)
+        XCTAssertEqual(feeTx.reportedBalanceAfter, 1_450_000)
+
+        // #8 Decimal .00 tail
+        let decTx = try XCTUnwrap(NotificationParser.parse(RawNotification(
+            sourceApp: .mbbank,
+            title: "Biến động số dư",
+            body: "TK 0901234567|GD: -150,000.00VND 21/11/26 10:15|SD: 4,850,000.00VND| ND: Thanh toan",
+            receivedAt: ts
+        )))
+        XCTAssertEqual(decTx.amount, 150_000)
+        XCTAssertEqual(decTx.reportedBalanceAfter, 4_850_000)
     }
 }
