@@ -2,36 +2,67 @@ import SwiftData
 import SwiftUI
 import UserNotifications
 
-@MainActor
-final class NotificationCenterDelegate: NSObject, @preconcurrency UNUserNotificationCenterDelegate {
-    var onSelectTransactionId: ((String) -> Void)?
-    var onOpenReconcile: (() -> Void)?
-    var onReceiveForegroundNotification: (() -> Void)?
+final class NotificationCenterDelegate: NSObject, UNUserNotificationCenterDelegate, @unchecked Sendable {
+    static let shared = NotificationCenterDelegate()
 
-    nonisolated func userNotificationCenter(
-        _ center: UNUserNotificationCenter,
-        willPresent notification: UNNotification
-    ) async -> UNNotificationPresentationOptions {
-        await MainActor.run {
-            self.onReceiveForegroundNotification?()
-        }
-        return [.banner, .sound]
+    @MainActor var onSelectTransactionId: ((String) -> Void)?
+    @MainActor var onOpenReconcile: (() -> Void)?
+    @MainActor var onReceiveForegroundNotification: (() -> Void)?
+
+    @MainActor private var pendingTransactionId: String?
+    @MainActor private var pendingOpenReconcile: Bool = false
+
+    private override init() {
+        super.init()
     }
 
-    nonisolated func userNotificationCenter(
+    func userNotificationCenter(
         _ center: UNUserNotificationCenter,
-        didReceive response: UNNotificationResponse
-    ) async {
+        willPresent notification: UNNotification,
+        withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void
+    ) {
+        completionHandler([.banner, .sound])
+        Task { @MainActor in
+            self.onReceiveForegroundNotification?()
+        }
+    }
+
+    func userNotificationCenter(
+        _ center: UNUserNotificationCenter,
+        didReceive response: UNNotificationResponse,
+        withCompletionHandler completionHandler: @escaping () -> Void
+    ) {
         let userInfo = response.notification.request.content.userInfo
         let txId = userInfo["transactionId"] as? String
         let route = userInfo["route"] as? String
 
-        await MainActor.run {
+        completionHandler()
+
+        Task { @MainActor in
             if let txId {
-                self.onSelectTransactionId?(txId)
+                if let handler = self.onSelectTransactionId {
+                    handler(txId)
+                } else {
+                    self.pendingTransactionId = txId
+                }
             } else if route == "reconcile" {
-                self.onOpenReconcile?()
+                if let handler = self.onOpenReconcile {
+                    handler()
+                } else {
+                    self.pendingOpenReconcile = true
+                }
             }
+        }
+    }
+
+    @MainActor
+    func consumePendingRouteIfNeeded() {
+        if let txId = pendingTransactionId {
+            pendingTransactionId = nil
+            onSelectTransactionId?(txId)
+        } else if pendingOpenReconcile {
+            pendingOpenReconcile = false
+            onOpenReconcile?()
         }
     }
 }
@@ -39,24 +70,29 @@ final class NotificationCenterDelegate: NSObject, @preconcurrency UNUserNotifica
 @main
 struct OutcomeApp: App {
     @State private var coordinator = AppCoordinator()
-    @State private var notificationDelegate = NotificationCenterDelegate()
     @Environment(\.scenePhase) private var scenePhase
+
+    init() {
+        UNUserNotificationCenter.current().delegate = NotificationCenterDelegate.shared
+    }
 
     var body: some Scene {
         WindowGroup {
             RootTabView()
                 .environment(coordinator)
                 .task {
-                    notificationDelegate.onSelectTransactionId = { txId in
+                    let delegate = NotificationCenterDelegate.shared
+                    delegate.onSelectTransactionId = { txId in
                         coordinator.openTransactionFromNotification(txId: txId)
                     }
-                    notificationDelegate.onOpenReconcile = {
+                    delegate.onOpenReconcile = {
                         coordinator.selectedTab = .wallets
                     }
-                    notificationDelegate.onReceiveForegroundNotification = {
+                    delegate.onReceiveForegroundNotification = {
                         coordinator.refresh()
                     }
-                    UNUserNotificationCenter.current().delegate = notificationDelegate
+                    delegate.consumePendingRouteIfNeeded()
+
                     await ReminderScheduler.requestAuthorizationIfNeeded()
                     await ReminderScheduler.scheduleNextMonthEndReminder()
                 }

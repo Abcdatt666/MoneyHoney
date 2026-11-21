@@ -144,7 +144,8 @@ final class AppCoordinator {
 
     func openTransactionFromNotification(txId: String) {
         refresh()
-        if let tx = allTransactions.first(where: { $0.id == txId }) {
+        if let tx = allTransactions.first(where: { $0.id == txId }),
+           tx.txType != .internalTransfer {
             selectedTab = .pending
             activeTaggingTransaction = tx
         }
